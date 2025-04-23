@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Prototyp FPS WebGL v4 - Poprawki</title>
+    <title>Prototyp FPS WebGL v6 - Poprawki</title>
     <style>
         body { margin: 0; overflow: hidden; background-color: #222; color: white; font-family: sans-serif; }
         canvas { display: block; }
@@ -52,15 +52,19 @@
             text-align: center;
             z-index: 5;
         }
+        /* Health bar below name is kept, but hearts are primary */
         .health-bar {
             height: 5px;
-            background-color: red;
+            background-color: #555; /* Darker background */
             margin-top: 2px;
+            border-radius: 2px;
+            overflow: hidden;
         }
          .health-bar-inner {
             height: 100%;
             background-color: lime;
             width: 100%;
+            transition: width 0.2s ease-out; /* Smooth transition */
          }
          #scoreboard {
             position: absolute;
@@ -117,6 +121,7 @@
              background-size: contain;
              background-repeat: no-repeat;
              background-position: center;
+             filter: drop-shadow(0 1px 1px rgba(0,0,0,0.5)); /* Subtle shadow */
          }
 
          .heart-full {
@@ -124,7 +129,8 @@
          }
 
          .heart-empty {
-              background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>');
+              background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%23cccccc" stroke-width="2"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>'); /* Lighter grey stroke */
+              opacity: 0.7;
          }
 
         #event-log {
@@ -216,9 +222,9 @@
     </style>
 </head>
 <body>
-    <div id="connection-status">Łączenie...</div>
+    <div id="connection-status">Connecting...</div>
     <div id="hud">
-        Amunicja: <span id="ammo">30 / 100</span>
+        Ammo: <span id="ammo">30 / 100</span>
     </div>
     <div id="top-right-hud">
          <div id="health-hearts"></div>
@@ -227,10 +233,10 @@
     <div id="crosshair"></div>
     <div id="player-labels"></div>
     <div id="scoreboard">
-        <h2>Tablica Wyników</h2>
+        <h2>Scoreboard</h2>
         <table id="scoreboard-table">
             <thead>
-                <tr><th>Gracz</th><th>Zabójstwa</th><th>Zgony</th></tr>
+                <tr><th>Player</th><th>Kills</th><th>Deaths</th></tr>
             </thead>
             <tbody></tbody>
         </table>
@@ -242,9 +248,9 @@
         </div>
     </div>
     <div id="death-screen">
-        <div id="death-message">ZGINĄŁEŚ!</div>
-        <div id="killer-info">Zabił Cię: <span id="killer-name">Nieznany</span></div>
-        <div id="respawn-timer">Odrodzenie za: 3s</div>
+        <div id="death-message">YOU DIED!</div>
+        <div id="killer-info">Killed by: <span id="killer-name">Unknown</span></div>
+        <div id="respawn-timer">Respawn in: 3s</div>
     </div>
 
 
@@ -260,6 +266,17 @@
     <script type="module">
         import * as THREE from 'three';
         import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+         let CapsuleGeometry = THREE.CapsuleGeometry;
+         if (!CapsuleGeometry) {
+             console.warn("THREE.CapsuleGeometry not found, using BoxGeometry for limbs.");
+             CapsuleGeometry = class FallbackCapsule extends THREE.BoxGeometry {
+                 constructor(radius = 0.5, length = 1, capSegments = 4, radialSegments = 8) {
+                     super(radius * 2, length + radius * 2, radius * 2);
+                     console.warn("Using fallback BoxGeometry for Capsule.");
+                 }
+             };
+         }
+
 
         // --- Global variables ---
         let scene, camera, renderer, controls;
@@ -288,14 +305,14 @@
         const clock = new THREE.Clock();
         const playerEyeLevel = 1.6;
         const playerHeight = 1.8;
-        const playerRadius = 0.4; // For player-player collision
+        const playerRadius = 0.4;
         const playerSpeed = 5.0;
         const gravity = 18.0;
         const jumpVelocity = 7.5;
         const START_HEALTH = 100;
         const MAX_MAGAZINE = 30;
-        const RELOAD_DURATION = 2000; // ms
-        const RESPAWN_TIME_SECONDS = 3; // s
+        const RELOAD_DURATION = 2000;
+        const RESPAWN_TIME_SECONDS = 3;
 
         // --- DOM Elements ---
         let ws;
@@ -319,453 +336,235 @@
         // --- Functions ---
 
         function init() {
-            // Scene setup
             scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x87CEEB); // Light blue sky
-            scene.fog = new THREE.Fog(0x87CEEB, 15, 70); // Add fog for depth
+            scene.background = new THREE.Color(0x87CEEB);
+            scene.fog = new THREE.Fog(0x87CEEB, 15, 70);
 
-            // Camera setup
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-            camera.position.y = playerEyeLevel;
 
-            // Renderer setup
             renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.setPixelRatio(window.devicePixelRatio);
             renderer.shadowMap.enabled = true;
-            renderer.shadowMap.type = THREE.PCFSoftShadowMap; // Softer shadows
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
             document.body.appendChild(renderer.domElement);
 
-            // PointerLockControls setup
             controls = new PointerLockControls(camera, document.body);
-            scene.add(controls.getObject()); // Add the controls object (which contains the camera) to the scene
-            controls.getObject().position.y = playerEyeLevel; // Set initial height correctly
+            const playerObject = controls.getObject();
+            playerObject.position.y = playerEyeLevel;
+            scene.add(playerObject);
 
-            // PointerLock event listeners
-            document.addEventListener('click', () => {
-                if (!controls.isLocked && !isDead) { // Lock only if not already locked and player is alive
-                    controls.lock();
-                }
-            });
+            document.addEventListener('click', () => { if (!controls.isLocked && !isDead) controls.lock(); });
             controls.addEventListener('lock', () => console.log('Pointer locked'));
-            controls.addEventListener('unlock', () => {
-                console.log('Pointer unlocked');
-                moveForward = moveBackward = moveLeft = moveRight = false; // Stop movement when cursor is unlocked
-            });
+            controls.addEventListener('unlock', () => { console.log('Pointer unlocked'); moveForward = moveBackward = moveLeft = moveRight = false; });
 
-            // Lighting setup
-            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
-            scene.add(ambientLight);
-            const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
-            dirLight.position.set(15, 20, 10);
-            dirLight.castShadow = true;
-            dirLight.shadow.mapSize.width = 2048;
-            dirLight.shadow.mapSize.height = 2048;
-            dirLight.shadow.camera.near = 0.5;
-            dirLight.shadow.camera.far = 60;
-            dirLight.shadow.camera.left = -25;
-            dirLight.shadow.camera.right = 25;
-            dirLight.shadow.camera.top = 25;
-            dirLight.shadow.camera.bottom = -25;
-            scene.add(dirLight);
-            // scene.add( new THREE.CameraHelper( dirLight.shadow.camera ) ); // Debug shadow camera
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7); scene.add(ambientLight);
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1.2); dirLight.position.set(15, 20, 10); dirLight.castShadow = true; dirLight.shadow.mapSize.width = 2048; dirLight.shadow.mapSize.height = 2048; dirLight.shadow.camera.near = 0.5; dirLight.shadow.camera.far = 60; dirLight.shadow.camera.left = -25; dirLight.shadow.camera.right = 25; dirLight.shadow.camera.top = 25; dirLight.shadow.camera.bottom = -25; scene.add(dirLight);
 
-            // Ground plane
-            const groundGeometry = new THREE.PlaneGeometry(100, 100);
-            const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x4a5d23, roughness: 0.9 }); // Dark green grass
-            const ground = new THREE.Mesh(groundGeometry, groundMaterial);
-            ground.rotation.x = -Math.PI / 2; // Rotate to be horizontal
-            ground.receiveShadow = true;
-            scene.add(ground);
+            const groundGeometry = new THREE.PlaneGeometry(100, 100); const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x4a5d23, roughness: 0.9 }); const ground = new THREE.Mesh(groundGeometry, groundMaterial); ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
 
-            // Obstacles (Boxes)
-            const boxGeometry = new THREE.BoxGeometry(1, 1, 1); // Base size
-            const boxMaterial = new THREE.MeshStandardMaterial({ color: 0xA0522D, roughness: 0.7 }); // Brown material
-            for (let i = 0; i < 15; ++i) {
-                const sizeX = Math.random() * 2 + 1;
-                const sizeY = Math.random() * 2 + 1;
-                const sizeZ = Math.random() * 2 + 1;
-                const box = new THREE.Mesh(boxGeometry.clone(), boxMaterial.clone()); // Clone geometry and material
-                box.scale.set(sizeX, sizeY, sizeZ);
-                box.position.set(Math.random() * 50 - 25, sizeY / 2, Math.random() * 50 - 25); // Position randomly, standing on ground
-                box.castShadow = true;
-                box.receiveShadow = true;
-                scene.add(box);
+            const boxGeometry = new THREE.BoxGeometry(1, 1, 1); const boxMaterial = new THREE.MeshStandardMaterial({ color: 0xA0522D, roughness: 0.7 });
+            for (let i = 0; i < 15; ++i) { const sizeX = Math.random() * 2 + 1; const sizeY = Math.random() * 2 + 1; const sizeZ = Math.random() * 2 + 1; const box = new THREE.Mesh(boxGeometry.clone(), boxMaterial.clone()); box.scale.set(sizeX, sizeY, sizeZ); box.position.set(Math.random() * 50 - 25, sizeY / 2, Math.random() * 50 - 25); box.castShadow = true; box.receiveShadow = true; scene.add(box); box.geometry.computeBoundingBox(); box.userData.boundingBox = new THREE.Box3(); box.updateMatrixWorld(true); box.userData.boundingBox.copy(box.geometry.boundingBox).applyMatrix4(box.matrixWorld); obstacles.push(box); }
 
-                // Prepare for collision detection
-                box.geometry.computeBoundingBox(); // Calculate AABB for base geometry
-                box.userData.boundingBox = new THREE.Box3(); // Create empty Box3 in userData
-                box.updateMatrixWorld(true); // Ensure world matrix is updated
-                // Copy and transform the geometry's bounding box to world coordinates
-                box.userData.boundingBox.copy(box.geometry.boundingBox).applyMatrix4(box.matrixWorld);
-                obstacles.push(box); // Add MESH to obstacles array
-                // scene.add(new THREE.Box3Helper(box.userData.boundingBox, 0xffff00)); // Debug bounding boxes
-            }
+            weaponModel = createWeaponModel(); camera.add(weaponModel); positionWeaponModel();
+            muzzleFlash = new THREE.PointLight(0xffcc66, 0, 5, 1); muzzleFlash.position.set(0.1, -0.05, -0.5); weaponModel.add(muzzleFlash);
 
-            // FPV weapon model setup
-            weaponModel = createWeaponModel();
-            camera.add(weaponModel); // Attach weapon to camera
-            positionWeaponModel(); // Position weapon relative to camera
+            document.addEventListener('keydown', onKeyDown); document.addEventListener('keyup', onKeyUp); document.addEventListener('mousedown', onMouseDown); window.addEventListener('resize', onWindowResize);
 
-            // Muzzle flash light setup
-            muzzleFlash = new THREE.PointLight(0xffcc66, 0, 5, 1); // Color, Intensity(0=off), Range, Decay
-            muzzleFlash.position.set(0.1, -0.05, -0.5); // Position in front of barrel (relative to weapon)
-            weaponModel.add(muzzleFlash);
-
-            // User input event listeners
-            document.addEventListener('keydown', onKeyDown);
-            document.addEventListener('keyup', onKeyUp);
-            document.addEventListener('mousedown', onMouseDown);
-            window.addEventListener('resize', onWindowResize);
-
-            // Initial UI setup
-            updateHealthHearts(); // Initialize hearts display (empty)
-
-            // Start WebSocket connection and animation loop
+            updateHealthHearts();
             connectWebSocket();
             animate();
         }
 
         function createWeaponModel() {
-            // Creates the FPV weapon model geometry and materials
-            const weaponGroup = new THREE.Group();
-            const gunMaterial = new THREE.MeshStandardMaterial({ color: 0x444444, metalness: 0.6, roughness: 0.4 });
-
-            // Main body
-            const body = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.15, 0.6), gunMaterial);
-            body.position.z = -0.2;
-            weaponGroup.add(body);
-
-            // Barrel
-            const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.4, 16), gunMaterial);
-            barrel.position.z = -0.6;
-            barrel.rotation.x = Math.PI / 2;
-            weaponGroup.add(barrel);
-
-            // Magazine
-            const magazine = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.2, 0.15), gunMaterial);
-            magazine.position.set(0, -0.15, -0.2);
-            weaponGroup.add(magazine);
-
-            // Grip
-            const grip = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.2, 0.08), gunMaterial);
-            grip.position.set(0, -0.08, 0.05);
-            grip.rotation.x = -Math.PI / 10;
-            weaponGroup.add(grip);
-
-            // Enable shadows for the weapon
-            weaponGroup.castShadow = true;
-            weaponGroup.traverse(child => { if (child.isMesh) child.castShadow = true; });
-
-            return weaponGroup;
+            const weaponGroup = new THREE.Group(); const gunMaterial = new THREE.MeshStandardMaterial({ color: 0x444444, metalness: 0.6, roughness: 0.4 });
+            const body = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.15, 0.6), gunMaterial); body.position.z = -0.2; weaponGroup.add(body);
+            const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.4, 16), gunMaterial); barrel.position.z = -0.6; barrel.rotation.x = Math.PI / 2; weaponGroup.add(barrel);
+            const magazine = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.2, 0.15), gunMaterial); magazine.position.set(0, -0.15, -0.2); weaponGroup.add(magazine);
+            const grip = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.2, 0.08), gunMaterial); grip.position.set(0, -0.08, 0.05); grip.rotation.x = -Math.PI / 10; weaponGroup.add(grip);
+            weaponGroup.castShadow = true; weaponGroup.traverse(child => { if (child.isMesh) child.castShadow = true; }); return weaponGroup;
         }
 
-        function positionWeaponModel() {
-            // Positions the FPV weapon relative to the camera
-            if (!weaponModel) return;
-            weaponModel.position.set(0.25, -0.25, -0.7); // Right, Down, Forward from camera
-            weaponModel.rotation.set(0, -Math.PI / 128, 0); // Slight rotation
-        }
+        function positionWeaponModel() { if (!weaponModel) return; weaponModel.position.set(0.25, -0.25, -0.7); weaponModel.rotation.set(0, -Math.PI / 128, 0); }
 
-        // Creates the 3rd person player model
         function createPlayerModel() {
             const playerGroup = new THREE.Group();
 
-            // Materials
-            const bodyMaterial = new THREE.MeshStandardMaterial({ color: Math.random() * 0xAAAAAA + 0x555555, roughness: 0.6 });
-            const headMaterial = new THREE.MeshStandardMaterial({ color: 0xffdbac, roughness: 0.5 }); // Skin color
-            const eyeMaterial = new THREE.MeshBasicMaterial({ color: 0x111111 }); // Black eyes
-            const mouthMaterial = new THREE.MeshBasicMaterial({ color: 0x880000 }); // Dark red mouth
+            // --- Materials ---
+            const bodyMaterial = new THREE.MeshStandardMaterial({ color: Math.random() * 0x888888 + 0x444444, roughness: 0.7, metalness: 0.1 });
+            const headMaterial = new THREE.MeshStandardMaterial({ color: 0xffdbac, roughness: 0.5 });
+            const gearMaterial = new THREE.MeshStandardMaterial({ color: 0x556B2F, roughness: 0.8 });
+            const helmetMaterial = new THREE.MeshStandardMaterial({ color: 0x404040, roughness: 0.6, metalness: 0.2 });
+            const eyeMaterial = new THREE.MeshBasicMaterial({ color: 0x111111 });
+            const mouthMaterial = new THREE.MeshBasicMaterial({ color: 0x880000 });
+            const weapon3PMaterial = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.7 });
 
-            // Dimensions
-            const headRadius = 0.2;
-            const torsoHeight = 0.7;
-            const torsoWidth = 0.4;
-            const limbThickness = 0.15; // Use BoxGeometry thickness
-            const armLength = 0.6;
-            const legHeight = 0.8;
+            // --- Dimensions ---
+            const headRadius = 0.2; const torsoHeight = 0.65; const torsoWidth = 0.45; const torsoDepth = 0.25;
+            const limbRadius = 0.09; const armLength = 0.55; const legHeight = 0.7;
+            const footDepth = 0.15; const footWidth = 0.12; const footLength = 0.25;
 
-            // Head (Sphere)
-            const headGeometry = new THREE.SphereGeometry(headRadius, 16, 12);
-            const headMesh = new THREE.Mesh(headGeometry, headMaterial);
-            const headY = legHeight + torsoHeight - headRadius * 0.5; // Y position of head center
-            headMesh.position.y = headY;
-            headMesh.castShadow = true;
-            playerGroup.add(headMesh);
+            // --- Vertical Positioning Calculations ---
+            const footCenterY = footDepth / 2; const legBaseY = footCenterY + footDepth / 2 + limbRadius; const legCenterY = legBaseY + legHeight / 2;
+            const torsoBaseY = legBaseY + legHeight + limbRadius; const torsoCenterY = torsoBaseY + torsoHeight / 2; const headCenterY = torsoBaseY + torsoHeight + headRadius * 0.9;
 
-            // --- FACIAL FEATURES (relative to headMesh) ---
-            const eyeRadius = 0.03;
-            const eyeY = headY + headRadius * 0.2;
-            const eyeZ = headRadius * 0.85; // Forward placement
-            const eyeX = headRadius * 0.4;
+            // --- Feet, Legs, Torso, Head, Face Features ---
+            const footGeometry = new THREE.BoxGeometry(footWidth, footDepth, footLength);
+            const leftFootMesh = new THREE.Mesh(footGeometry, gearMaterial); leftFootMesh.position.set(-(torsoWidth / 4), footCenterY, footLength * 0.3); leftFootMesh.castShadow = true; playerGroup.add(leftFootMesh);
+            const rightFootMesh = new THREE.Mesh(footGeometry, gearMaterial); rightFootMesh.position.set(torsoWidth / 4, footCenterY, footLength * 0.3); rightFootMesh.castShadow = true; playerGroup.add(rightFootMesh);
 
-            const leftEye = new THREE.Mesh(new THREE.SphereGeometry(eyeRadius, 8, 8), eyeMaterial);
-            leftEye.position.set(-eyeX, eyeY, eyeZ);
-            playerGroup.add(leftEye); // Add directly to player group
+            const legGeometry = CapsuleGeometry ? new CapsuleGeometry(limbRadius, legHeight, 8, 16) : new THREE.BoxGeometry(limbRadius*2, legHeight+limbRadius*2, limbRadius*2);
+            const leftLegMesh = new THREE.Mesh(legGeometry, bodyMaterial); leftLegMesh.position.set(-(torsoWidth / 4), legCenterY, 0); leftLegMesh.castShadow = true; playerGroup.add(leftLegMesh);
+            const rightLegMesh = new THREE.Mesh(legGeometry, bodyMaterial); rightLegMesh.position.set(torsoWidth / 4, legCenterY, 0); rightLegMesh.castShadow = true; playerGroup.add(rightLegMesh);
 
-            const rightEye = new THREE.Mesh(new THREE.SphereGeometry(eyeRadius, 8, 8), eyeMaterial);
-            rightEye.position.set(eyeX, eyeY, eyeZ);
-            playerGroup.add(rightEye);
+            const torsoGeometry = new THREE.BoxGeometry(torsoWidth, torsoHeight, torsoDepth); const torsoMesh = new THREE.Mesh(torsoGeometry, bodyMaterial); torsoMesh.position.y = torsoCenterY; torsoMesh.castShadow = true; playerGroup.add(torsoMesh);
+            const headGeometry = new THREE.SphereGeometry(headRadius, 20, 16); const headMesh = new THREE.Mesh(headGeometry, headMaterial); headMesh.position.y = headCenterY; headMesh.castShadow = true; playerGroup.add(headMesh);
 
-            const noseRadius = 0.04;
-            const noseMesh = new THREE.Mesh(new THREE.SphereGeometry(noseRadius, 6, 6), headMaterial); // Skin color nose
-            noseMesh.position.set(0, headY - headRadius * 0.1, headRadius * 0.8);
-            playerGroup.add(noseMesh);
+            const eyeRadius = 0.03; const eyeYOffset = headRadius * 0.2; const eyeZOffset = headRadius * 0.85; const eyeXOffset = headRadius * 0.4;
+            const leftEye = new THREE.Mesh(new THREE.SphereGeometry(eyeRadius, 8, 8), eyeMaterial); leftEye.position.set(-eyeXOffset, headCenterY + eyeYOffset, eyeZOffset); playerGroup.add(leftEye);
+            const rightEye = new THREE.Mesh(new THREE.SphereGeometry(eyeRadius, 8, 8), eyeMaterial); rightEye.position.set(eyeXOffset, headCenterY + eyeYOffset, eyeZOffset); playerGroup.add(rightEye);
+            const noseRadius = 0.04; const noseMesh = new THREE.Mesh(new THREE.SphereGeometry(noseRadius, 6, 6), headMaterial); noseMesh.position.set(0, headCenterY - headRadius * 0.1, headRadius * 0.8); playerGroup.add(noseMesh);
+            const mouthGeom = new THREE.TorusGeometry(0.06, 0.015, 8, 12, Math.PI); const mouthMesh = new THREE.Mesh(mouthGeom, mouthMaterial); mouthMesh.position.set(0, headCenterY - headRadius * 0.4, headRadius * 0.75); mouthMesh.rotation.z = Math.PI; playerGroup.add(mouthMesh);
 
-            const mouthGeom = new THREE.TorusGeometry(0.06, 0.015, 8, 12, Math.PI); // Half torus for smile
-            const mouthMesh = new THREE.Mesh(mouthGeom, mouthMaterial);
-            mouthMesh.position.set(0, headY - headRadius * 0.4, headRadius * 0.75);
-            mouthMesh.rotation.z = Math.PI; // Flip upside down
-            playerGroup.add(mouthMesh);
-            // --- END FACIAL FEATURES ---
-
-            // Torso (Box)
-            const torsoGeometry = new THREE.BoxGeometry(torsoWidth, torsoHeight, torsoWidth * 0.6);
-            const torsoMesh = new THREE.Mesh(torsoGeometry, bodyMaterial);
-            torsoMesh.position.y = legHeight + torsoHeight / 2;
-            torsoMesh.castShadow = true;
-            playerGroup.add(torsoMesh);
-
-            // --- ARMS (Modified for holding weapon pose) ---
-            const armGeometry = new THREE.BoxGeometry(limbThickness, armLength, limbThickness);
+            // --- Arms Repositioned and Rotated to Hold Weapon ---
+            const armGeometry = CapsuleGeometry ? new CapsuleGeometry(limbRadius, armLength, 8, 16) : new THREE.BoxGeometry(limbRadius*2, armLength+limbRadius*2, limbRadius*2);
+            const armCenterY = torsoCenterY + torsoHeight * 0.3; // Base Y position for arms
+            const armShoulderOffset = torsoWidth / 2 + limbRadius * 0.5; // Horizontal distance from center
+            const armForwardOffset = torsoDepth / 2 + limbRadius * 0.5; // Forward distance from torso center
 
             // Left Arm
             const leftArmMesh = new THREE.Mesh(armGeometry, bodyMaterial);
-            leftArmMesh.position.set(-(torsoWidth / 2 + limbThickness * 0.4), legHeight + torsoHeight * 0.5, 0.1); // Move forward (Z) and slightly lower (Y)
-            leftArmMesh.rotation.set(Math.PI / 3, 0, Math.PI / 6); // Rotate forward (X) and slightly inward (Z)
             leftArmMesh.castShadow = true;
+            leftArmMesh.position.set(-armShoulderOffset, armCenterY - 0.1, armForwardOffset); // Lowered slightly, moved forward
+            leftArmMesh.rotation.set(Math.PI * 0.35, -Math.PI * 0.1, -Math.PI * 0.1); // Rotated more forward, slightly inward and down
             playerGroup.add(leftArmMesh);
 
-            // Right Arm (Clone and mirror)
-            const rightArmMesh = leftArmMesh.clone();
-            rightArmMesh.position.x *= -1; // Mirror position X
-            rightArmMesh.rotation.z *= -1; // Mirror rotation Z
-            // rightArmMesh.rotation.y *= -1; // Mirror rotation Y (if needed)
+            // Right Arm
+            const rightArmMesh = new THREE.Mesh(armGeometry, bodyMaterial);
+            rightArmMesh.castShadow = true;
+            rightArmMesh.position.set(armShoulderOffset, armCenterY - 0.1, armForwardOffset); // Lowered slightly, moved forward
+            rightArmMesh.rotation.set(Math.PI * 0.35, Math.PI * 0.1, Math.PI * 0.1); // Rotated more forward, slightly inward and down
             playerGroup.add(rightArmMesh);
-            // --- END ARMS ---
 
 
-            // Legs (Box)
-            const legGeometry = new THREE.BoxGeometry(limbThickness * 1.2, legHeight, limbThickness * 1.2);
-            const leftLegMesh = new THREE.Mesh(legGeometry, bodyMaterial);
-            leftLegMesh.position.set(-(torsoWidth / 4), legHeight / 2, 0);
-            leftLegMesh.castShadow = true;
-            playerGroup.add(leftLegMesh);
+            // --- Gear ---
+            const helmetRadius = headRadius * 1.15; const helmetGeometry = new THREE.SphereGeometry(helmetRadius, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.7); const helmetMesh = new THREE.Mesh(helmetGeometry, helmetMaterial); helmetMesh.position.y = headCenterY + 0.02; helmetMesh.rotation.x = -0.1; helmetMesh.castShadow = true; playerGroup.add(helmetMesh);
+            const vestGeometry = new THREE.BoxGeometry(torsoWidth * 1.1, torsoHeight * 0.9, torsoDepth * 1.2); const vestMesh = new THREE.Mesh(vestGeometry, gearMaterial); vestMesh.position.y = torsoCenterY; vestMesh.castShadow = true; playerGroup.add(vestMesh);
+            const backpackGeometry = new THREE.BoxGeometry(torsoWidth * 0.7, torsoHeight * 0.6, torsoDepth * 0.8); const backpackMesh = new THREE.Mesh(backpackGeometry, gearMaterial); backpackMesh.position.set(0, torsoCenterY - torsoHeight*0.1, -(torsoDepth / 2 + torsoDepth * 0.4 / 2)); backpackMesh.castShadow = true; playerGroup.add(backpackMesh);
 
-            const rightLegMesh = leftLegMesh.clone();
-            rightLegMesh.position.x *= -1;
-            playerGroup.add(rightLegMesh);
+            // --- *** Add Visible 3rd Person Weapon - Repositioned *** ---
+            const weapon3PGeometry = new THREE.BoxGeometry(0.1, 0.12, 0.75); // Slightly longer rifle shape
+            const weapon3PMesh = new THREE.Mesh(weapon3PGeometry, weapon3PMaterial);
 
-            // Set group origin to feet level
-            playerGroup.position.set(0, 0, 0);
+            // *** POPRAWKA: Dostosowanie pozycji i rotacji broni 3P ***
+            // Pozycjonujemy broń względem *przybliżonej* pozycji dłoni wynikającej z ułożenia ramion
+            const weaponY = armCenterY - 0.18; // Nieco niżej, aby pasowało do uchwytu
+            const weaponZ = armForwardOffset + armLength * 0.35; // Bardziej do przodu, bliżej końca ramion
+            weapon3PMesh.position.set(0, weaponY, weaponZ); // Pozycja w przestrzeni gracza
+            weapon3PMesh.rotation.set(Math.PI * 0.4, 0, 0); // Kąt podobny do ramion (może wymagać dalszej korekty)
 
-            // Enable shadows for all parts
-            playerGroup.traverse(child => {
-                if (child.isMesh) {
-                    child.castShadow = true;
-                    child.receiveShadow = true; // Model can receive shadows too
-                }
-            });
+            weapon3PMesh.castShadow = true;
+            playerGroup.add(weapon3PMesh);
+            playerGroup.userData.weaponMesh = weapon3PMesh; // Store reference
 
-            // Add placeholder weapon (optional, FPV weapon is separate)
-            // addWeaponToPlayerModel(playerGroup); // We hide/show this separately if needed
+            // --- Final Group Setup ---
+            playerGroup.position.set(0, 0, 0); // Model base at (0,0,0) relative to player group anchor
+            playerGroup.traverse(child => { if (child.isMesh) { child.castShadow = true; child.receiveShadow = true; }});
 
             return playerGroup;
         }
 
-
-        // Adds a simple placeholder weapon to the 3rd person model
-        function addWeaponToPlayerModel(playerGroup) {
-            const weaponMaterial = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.7 });
-            const simpleWeapon = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.5), weaponMaterial);
-            // Position relative to player group origin (feet) - adjust by trial & error
-            simpleWeapon.position.set(0, playerHeight * 0.65, 0.3); // Roughly chest height, forward
-            simpleWeapon.rotation.set(0, 0, 0); // Basic rotation
-            simpleWeapon.castShadow = true;
-            playerGroup.add(simpleWeapon);
-            playerGroup.userData.weaponMesh = simpleWeapon; // Store reference
-            return simpleWeapon;
-        }
-
-
-        function connectWebSocket() {
-            const wsUrl = `ws://localhost:8080`; // Use localhost or your server address
-            // const wsUrl = `ws://${window.location.hostname}:8080`; // Use if server is on same host
-            console.log(`Connecting to ${wsUrl}...`);
-            updateConnectionStatus('Connecting...');
-            ws = new WebSocket(wsUrl);
-
-            ws.onopen = () => {
-                console.log("Connected to WebSocket server.");
-                updateConnectionStatus('Connected');
-            };
-
-            ws.onmessage = (event) => {
-                try {
-                    const message = JSON.parse(event.data);
-                    handleServerMessage(message);
-                } catch (error) {
-                    console.error("Error processing server message:", error, "Received:", event.data);
-                }
-            };
-
-            ws.onerror = (error) => {
-                console.error("WebSocket Error:", error);
-                updateConnectionStatus('Connection Error!');
-                updateHUD(0, 0); // Reset ammo HUD
-                updateHealthHearts(); // Reset hearts
-                resetLocalState();
-            };
-
-            ws.onclose = () => {
-                console.log("Disconnected from WebSocket server.");
-                updateConnectionStatus('Disconnected');
-                updateHUD(0, 0);
-                updateHealthHearts();
-                resetLocalState();
-
-                // Clean up scene on disconnect
-                for (const id in players) removePlayer(id);
-                players = {};
-                for (const id in projectiles) removeProjectile(id);
-                projectiles = {};
-                updateScoreboard(); // Clear scoreboard
-            };
-        }
-
-        function resetLocalState() {
-            // Resets client state on disconnect/error
-            localPlayerId = null;
-            localPlayerStats = { kills: 0, deaths: 0, health: 0, magazine: 0, ammo: 0 };
-            isReloading = false;
-            isDead = true; // Consider disconnected player as dead
-            hideReloadStatus();
-            hideScoreboard();
-            hideDeathScreen(); // Don't show death screen on simple disconnect
-        }
-
-        function updateConnectionStatus(status) {
-            // Updates the connection status display
-            if (connectionStatusElement) {
-                connectionStatusElement.textContent = status;
-                connectionStatusElement.style.display = 'block';
-                if (status === 'Connected') {
-                    connectionStatusElement.style.color = '#00ff00'; // Green
-                    setTimeout(() => { if (connectionStatusElement.textContent === 'Connected') connectionStatusElement.style.display = 'none'; }, 3000);
-                } else if (status === 'Disconnected' || status.includes('Error')) {
-                    connectionStatusElement.style.color = 'red'; // Red
-                } else {
-                    connectionStatusElement.style.color = '#ffcc00'; // Yellow for 'Connecting...'
-                }
-            }
-        }
+        function connectWebSocket() { const wsUrl = `ws://localhost:8080`; console.log(`Connecting to ${wsUrl}...`); updateConnectionStatus('Connecting...'); ws = new WebSocket(wsUrl); ws.onopen = () => { console.log("Connected to WebSocket server."); updateConnectionStatus('Connected'); }; ws.onmessage = (event) => { try { const message = JSON.parse(event.data); handleServerMessage(message); } catch (error) { console.error("Error processing server message:", error, "Received:", event.data); } }; ws.onerror = (error) => { console.error("WebSocket Error:", error); updateConnectionStatus('Connection Error!'); updateHUD(0, 0); updateHealthHearts(); resetLocalState(); }; ws.onclose = () => { console.log("Disconnected from WebSocket server."); updateConnectionStatus('Disconnected'); updateHUD(0, 0); updateHealthHearts(); resetLocalState(); for (const id in players) removePlayer(id); players = {}; for (const id in projectiles) removeProjectile(id); projectiles = {}; updateScoreboard(); }; }
+        function resetLocalState() { localPlayerId = null; localPlayerStats = { kills: 0, deaths: 0, health: 0, magazine: 0, ammo: 0 }; isReloading = false; isDead = true; // Assume dead on reset
+            hideReloadStatus(); hideScoreboard(); hideDeathScreen(); if (controls.isLocked) controls.unlock(); }
+        function updateConnectionStatus(status) { if (!connectionStatusElement) return; connectionStatusElement.textContent = status; connectionStatusElement.style.display = 'block'; if (status === 'Connected') { connectionStatusElement.style.color = '#00ff00'; setTimeout(() => { if (connectionStatusElement.textContent === 'Connected') connectionStatusElement.style.display = 'none'; }, 3000); } else if (status === 'Disconnected' || status.includes('Error')) { connectionStatusElement.style.color = 'red'; } else { connectionStatusElement.style.color = '#ffcc00'; } }
 
         function handleServerMessage(message) {
-            // Handles messages received from the WebSocket server
-             // console.log("[Received]", message.type, message.payload); // DEBUG: Log all incoming messages
             switch (message.type) {
-                case 'init': // Initial state on connection
+                case 'init':
                     localPlayerId = message.payload.id;
                     console.log(`Received ID: ${localPlayerId}`);
-                    // Clear old data
+                    // Clear existing players and projectiles on initialization
                     for (const id in players) removePlayer(id);
                     players = {};
                     for (const id in projectiles) removeProjectile(id);
                     projectiles = {};
-
                     isDead = false; // Assume alive on init
                     hideDeathScreen();
-
-                    // Process initial player list
+                    // Populate initial game state
                     for (const id in message.payload.players) {
                         const pData = message.payload.players[id];
                         if (id === localPlayerId) {
-                            // Set local player position and stats
-                            controls.getObject().position.set(pData.x, playerEyeLevel, pData.z);
-                            playerVelocity.set(0, 0, 0); // Reset velocity
+                            // Set local player position and state
+                            controls.getObject().position.set(pData.x, pData.y, pData.z);
+                            playerVelocity.set(0, 0, 0);
                             localPlayerStats = { name: pData.name, kills: pData.kills, deaths: pData.deaths, health: pData.health, magazine: pData.magazine, ammo: pData.ammo };
                             updateHUD(pData.magazine, pData.ammo);
                             updateHealthHearts();
                             checkReloadPrompt();
+                            if (pData.health <= 0) { // Check if spawned dead (unlikely but possible)
+                                showDeathScreen();
+                                killerName = 'Unknown'; // Or get from server if available
+                            }
                         } else {
-                            addOrUpdatePlayer(pData); // Add other players
+                            addOrUpdatePlayer(pData);
                         }
                     }
-                    // Add existing projectiles
                     message.payload.projectiles?.forEach(pData => addOrUpdateProjectile(pData));
-                    updateScoreboard(); // Update scoreboard with initial data
+                    updateScoreboard();
                     break;
-
                 case 'player_joined':
                     addLogMessage(`${message.payload.name} joined the game.`, 'join');
                     if (message.payload.id !== localPlayerId) {
                         addOrUpdatePlayer(message.payload);
                     }
-                    if (scoreboardElement.style.display === 'block') {
-                        updateScoreboard();
-                    }
+                    if (scoreboardElement.style.display === 'block') updateScoreboard();
                     break;
-
                 case 'player_left':
                     addLogMessage(`${message.payload.name || 'Player'} left the game.`, 'leave');
                     if (message.payload.id !== localPlayerId) {
                         removePlayer(message.payload.id);
                     }
-                    if (scoreboardElement.style.display === 'block') {
-                        updateScoreboard();
-                    }
+                    if (scoreboardElement.style.display === 'block') updateScoreboard();
                     break;
-
                 case 'game_state':
                     let localPlayerDiedThisTick = false;
                     // Update all players based on server state
                     for (const id in message.payload.players) {
                         const pData = message.payload.players[id];
                         if (id === localPlayerId) {
-                             // console.log(`[Game State Received] Local player ${id} health from server: ${pData.health}`); // DEBUG LOG
-
-                            // Detect if local player just died
+                            // Check if died this tick
                             if (localPlayerStats.health > 0 && pData.health <= 0 && !isDead) {
                                 localPlayerDiedThisTick = true;
-                                console.log("Local player death detected.");
                             }
-                            // Update local stats (server is authoritative)
-                            localPlayerStats.kills = pData.kills;
-                            localPlayerStats.deaths = pData.deaths;
-                            localPlayerStats.health = pData.health;
-                            localPlayerStats.magazine = pData.magazine;
-                            localPlayerStats.ammo = pData.ammo;
-
-                            // Update UI
-                             // console.log(`    Updating hearts with health: ${localPlayerStats.health}`); // DEBUG LOG
+                            // Update local player stats
+                            localPlayerStats = { ...localPlayerStats, ...pData };
                             updateHUD(pData.magazine, pData.ammo);
-                            updateHealthHearts(); // THIS is the crucial call for heart UI
+                            updateHealthHearts();
                             checkReloadPrompt();
-
-                            // Ensure 'isDead' flag is correct
+                            // Handle respawn initiated by server implicitly through health > 0
                             if (pData.health > 0 && isDead) {
                                 isDead = false;
                                 hideDeathScreen();
+                                // Position might also be updated here if server sends it
+                                controls.getObject().position.set(pData.x, pData.y, pData.z);
+                                playerVelocity.set(0,0,0); // Reset velocity on respawn/state update
                             }
-
                         } else {
-                            addOrUpdatePlayer(pData); // Update remote players
+                            addOrUpdatePlayer(pData);
                         }
                     }
-
-                    // Remove projectiles marked for removal by server
+                    // Remove projectiles that expired or hit something
                     message.payload.removedProjectiles?.forEach(projId => removeProjectile(projId));
-
-                    // Process hit events (e.g., show hit marker)
+                    // Handle hit feedback (visual/audio could be added here)
                     message.payload.hits?.forEach(hit => {
                         if (hit.targetId === localPlayerId) {
                             console.log(`You were hit by ${hit.attackerName}! Health: ${hit.newHealth}`);
-                            // Add visual hit feedback here (e.g., red flash)
+                            // TODO: Add visual hit indicator (e.g., red flash)
                         }
-                        // Health bar update is handled by addOrUpdatePlayer via game_state.players
+                        // TODO: Add hit sound effect for hits on others?
                     });
-
-                    // Process death events for the event log and death screen
+                    // Handle death events and log messages
                     message.payload.deaths?.forEach(death => {
                         const victimName = death.victimName || 'Unknown';
                         const attackerName = death.attackerName || 'Unknown';
@@ -775,88 +574,84 @@
                             ? `${victimSpan} committed suicide.`
                             : `${attackerSpan} defeated ${victimSpan}.`;
                         addLogMessage(killMsg, 'kill');
-
-                        // If local player died this tick, show death screen
+                        // Show death screen if local player died *this tick*
                         if (death.victimId === localPlayerId && localPlayerDiedThisTick) {
-                            killerName = attackerName; // Store killer name
+                            killerName = attackerName;
                             showDeathScreen();
                         }
                     });
-
-                    // Update scoreboard if visible
-                    if (scoreboardElement.style.display === 'block') {
-                        updateScoreboard();
-                    }
+                    // Update scoreboard if it's visible
+                    if (scoreboardElement.style.display === 'block') updateScoreboard();
                     break;
-
-                case 'projectile_created': // New projectile from server
+                case 'projectile_created':
                     addOrUpdateProjectile(message.payload);
                     break;
-
-                case 'ammo_update': // Received after reload or shot confirmation
+                case 'ammo_update':
                     if (localPlayerId) {
                         localPlayerStats.magazine = message.payload.magazine;
                         localPlayerStats.ammo = message.payload.ammo;
                         updateHUD(message.payload.magazine, message.payload.ammo);
-                        if (isReloading) { // If reloading, this message confirms completion
+                        // If reloading finished (indicated by server sending update), hide status
+                        if (isReloading) {
                             isReloading = false;
                             hideReloadStatus();
                         }
-                        checkReloadPrompt(); // Re-check reload prompt status
+                        checkReloadPrompt(); // Check if prompt needed after update
                     }
                     break;
-
                 case 'player_respawned':
                     const respawnedData = message.payload;
                     if (respawnedData.id === localPlayerId) {
-                        // Local player respawned
                         console.log("You have respawned!");
                         isDead = false;
                         hideDeathScreen();
-                        controls.getObject().position.set(respawnedData.x, playerEyeLevel, respawnedData.z);
-                        playerVelocity.set(0, 0, 0);
-                        // Update local stats from respawn data
+                        controls.getObject().position.set(respawnedData.x, respawnedData.y, respawnedData.z);
+                        playerVelocity.set(0, 0, 0); // Reset velocity
                         localPlayerStats.health = respawnedData.health;
                         localPlayerStats.magazine = respawnedData.magazine;
                         localPlayerStats.ammo = respawnedData.ammo;
                         updateHUD(respawnedData.magazine, respawnedData.ammo);
                         updateHealthHearts();
                         checkReloadPrompt();
-                        // Optionally re-lock cursor if needed
-                        // if (!controls.isLocked) controls.lock();
                     } else {
-                        // Another player respawned - update their visibility and position
+                        // Update other player's state on their respawn
                         if (players[respawnedData.id]) {
                             const player = players[respawnedData.id];
-                            player.mesh.visible = true; // Make sure mesh is visible
-                            player.mesh.position.set(respawnedData.x, 0, respawnedData.z);
-                            // Health/ammo will be updated by the next game_state
-                            if (player.weaponMesh) player.weaponMesh.visible = true; // Show weapon too
+                            player.mesh.visible = true;
+                            // Set position directly, maybe lerp later if needed
+                            player.mesh.position.set(respawnedData.x, respawnedData.y - playerEyeLevel, respawnedData.z);
+                            player.health = respawnedData.health;
+                            // Update label and health bar
+                            if (player.labelElement) player.labelElement.style.display = 'block';
+                            updatePlayerLabel(player, player.health);
+                             // Make weapon visible again
+                            if(player.weaponMesh) player.weaponMesh.visible = true;
                         } else {
-                            // If player wasn't known, add them (might happen with packet loss)
+                            // If player wasn't known, add them (unlikely case for respawn)
                             addOrUpdatePlayer(respawnedData);
                         }
                     }
+                     // Update scoreboard if visible
+                    if (scoreboardElement.style.display === 'block') updateScoreboard();
                     break;
             }
         }
 
         function addLogMessage(message, type = 'info') {
-            // Adds a message to the event log UI
             if (!eventLogElement) return;
             const messageDiv = document.createElement('div');
             messageDiv.className = `log-message ${type}`;
-            messageDiv.innerHTML = message; // Use innerHTML to allow styled spans
-            eventLogElement.appendChild(messageDiv); // Appends to bottom due to flex-reverse
+            messageDiv.innerHTML = message; // Use innerHTML to parse spans for kill messages
+            eventLogElement.appendChild(messageDiv);
 
-            // Remove the message after the fadeOut animation completes
+            // Remove the message after animation finishes (plus a buffer)
             setTimeout(() => {
                 if (messageDiv.parentNode === eventLogElement) {
                     eventLogElement.removeChild(messageDiv);
                 }
-            }, 5500); // Slightly longer than animation
+            }, 5500); // Match animation duration + buffer
 
-            // Limit the number of messages in the log
+            // Limit the number of messages displayed
             const maxMessages = 5;
             while (eventLogElement.children.length > maxMessages) {
                 if (eventLogElement.firstChild) {
@@ -868,91 +663,105 @@
         }
 
         function addOrUpdatePlayer(playerData) {
-            // Adds a new player mesh or updates an existing one
             if (!playerData || !playerData.id) return;
             let player = players[playerData.id];
+            const meshY = playerData.y - playerEyeLevel; // Calculate target feet Y from server eye Y
 
             if (!player) {
-                // --- Create New Player ---
-                const playerModel = createPlayerModel(); // Create the 3D mesh
-                playerModel.position.set(playerData.x, 0, playerData.z); // Set initial position (Y=0 for feet)
+                // Create new player model and label
+                const playerModel = createPlayerModel();
+                playerModel.position.set(playerData.x, meshY, playerData.z); // Use calculated mesh Y
                 scene.add(playerModel);
-
-                // Create HTML label (name + health bar)
                 const labelDiv = document.createElement('div');
                 labelDiv.className = 'player-label';
-                labelDiv.innerHTML = `
-                    ${playerData.name || 'Unknown'}
-                    <div class="health-bar"><div class="health-bar-inner"></div></div>
-                 `;
+                // Set initial content
+                labelDiv.innerHTML = `${playerData.name || 'Unknown'} <div class="health-bar"><div class="health-bar-inner"></div></div>`;
                 document.getElementById('player-labels').appendChild(labelDiv);
                 const healthBarInner = labelDiv.querySelector('.health-bar-inner');
 
-                // Store player data locally
+                // Store player data
                 players[playerData.id] = {
-                    id: playerData.id, name: playerData.name, mesh: playerModel,
-                    labelElement: labelDiv, healthBarElement: healthBarInner,
-                    health: playerData.health, kills: playerData.kills, deaths: playerData.deaths,
-                    weaponMesh: playerModel.userData.weaponMesh // Store reference if created
+                    id: playerData.id,
+                    name: playerData.name,
+                    mesh: playerModel,
+                    labelElement: labelDiv,
+                    healthBarElement: healthBarInner,
+                    health: playerData.health,
+                    kills: playerData.kills,
+                    deaths: playerData.deaths,
+                    weaponMesh: playerModel.userData.weaponMesh // Store ref to 3P weapon
                 };
                 player = players[playerData.id];
                 console.log(`Added player: ${playerData.name} (${playerData.id})`);
             } else {
-                // --- Update Existing Player ---
-                // Smoothly interpolate position and rotation
-                player.mesh.position.lerp(new THREE.Vector3(playerData.x, 0, playerData.z), 0.3); // Adjust lerp factor for smoothness
-                player.mesh.rotation.y = THREE.MathUtils.lerp(player.mesh.rotation.y, playerData.yaw, 0.5); // Lerp yaw
+                // Update existing player position with interpolation (lerp)
+                player.mesh.position.x = THREE.MathUtils.lerp(player.mesh.position.x, playerData.x, 0.3);
+                player.mesh.position.y = THREE.MathUtils.lerp(player.mesh.position.y, meshY, 0.3); // Lerp Y
+                player.mesh.position.z = THREE.MathUtils.lerp(player.mesh.position.z, playerData.z, 0.3);
 
-                // Update stored stats
+                // *** POPRAWKA: Lerp rotation with Math.PI offset and wrap-around handling ***
+                const targetYaw = playerData.yaw + Math.PI;
+                const currentYaw = player.mesh.rotation.y;
+                // Calculate the shortest angle difference
+                let angleDifference = targetYaw - currentYaw;
+                while (angleDifference < -Math.PI) angleDifference += Math.PI * 2;
+                while (angleDifference > Math.PI) angleDifference -= Math.PI * 2;
+                // Apply lerp to the difference
+                player.mesh.rotation.y = currentYaw + angleDifference * 0.5; // Adjust lerp factor (0.5) as needed
+
+                // Update other stats
                 player.health = playerData.health;
                 player.kills = playerData.kills;
                 player.deaths = playerData.deaths;
+                // Update name if it changes (optional)
+                if (player.name !== playerData.name && player.labelElement) {
+                     player.name = playerData.name;
+                     player.labelElement.firstChild.textContent = `${player.name || 'Unknown'} `; // Update name part of label
+                }
             }
-
-            // Set visibility based on health
+            // Update visibility based on health
             const isAlive = playerData.health > 0;
             player.mesh.visible = isAlive;
             player.labelElement.style.display = isAlive ? 'block' : 'none';
-            if (player.weaponMesh) { // Hide/show placeholder weapon too
+            // Ensure 3P Weapon visibility matches player visibility
+            if (player.weaponMesh) {
                 player.weaponMesh.visible = isAlive;
             }
-
-            // Update label position and health bar if alive
+            // Update health bar and position if alive
             if (isAlive) {
                 updatePlayerLabel(player, playerData.health);
             }
         }
 
         function removePlayer(playerId) {
-            // Removes a player's mesh and data
-            const player = players[playerId];
-            if (player) {
-                console.log(`Removing player: ${player.name} (${playerId})`);
-                scene.remove(player.mesh); // Remove mesh from scene
-                // Dispose geometry and materials to free memory
-                player.mesh.traverse(child => {
-                    if (child.geometry) child.geometry.dispose();
-                    if (child.material) {
-                        if (Array.isArray(child.material)) {
-                            child.material.forEach(mat => mat.dispose());
-                        } else {
-                            child.material.dispose();
-                        }
-                    }
-                });
-                // Remove HTML label
-                if (player.labelElement && player.labelElement.parentNode) {
-                    player.labelElement.parentNode.removeChild(player.labelElement);
-                }
-                delete players[playerId]; // Remove from local players object
-            }
-        }
+             const player = players[playerId];
+             if (player) {
+                 console.log(`Removing player: ${player.name} (${playerId})`);
+                 // Remove mesh from scene
+                 scene.remove(player.mesh);
+                 // Dispose geometry and materials to free memory
+                 player.mesh.traverse(child => {
+                     if (child.geometry) child.geometry.dispose();
+                     if (child.material) {
+                         if (Array.isArray(child.material)) {
+                             child.material.forEach(mat => mat.dispose());
+                         } else {
+                             child.material.dispose();
+                         }
+                     }
+                 });
+                 // Remove label from DOM
+                 if (player.labelElement && player.labelElement.parentNode) {
+                     player.labelElement.parentNode.removeChild(player.labelElement);
+                 }
+                 // Delete player data
+                 delete players[playerId];
+             }
+         }
 
-        const LABEL_Y_OFFSET = playerHeight + 0.3; // Offset for label above player head
-
+        const LABEL_Y_OFFSET = playerHeight + 0.4; // Adjust as needed for label height above model
         function updatePlayerLabel(player, health) {
-            // Updates the health bar and position of a player's HTML label
-            if (!player || !player.labelElement) return;
+            if (!player || !player.labelElement || !player.mesh) return;
 
             // Update health bar width
             const healthPerc = Math.max(0, Math.min(100, (health / START_HEALTH) * 100));
@@ -960,166 +769,166 @@
                 player.healthBarElement.style.width = `${healthPerc}%`;
             }
 
-            // Update label position on screen
             const mesh = player.mesh;
             const label = player.labelElement;
+
+            // Project world position to screen position
             const worldPosition = new THREE.Vector3();
-            mesh.getWorldPosition(worldPosition); // Get world position of mesh origin (feet)
-            worldPosition.y += LABEL_Y_OFFSET; // Adjust height to be above head
-            const screenPosition = worldPosition.project(camera); // Project 3D position to 2D screen coordinates
+            // Get world position of the mesh and add offset for label height
+            mesh.getWorldPosition(worldPosition);
+            worldPosition.y += LABEL_Y_OFFSET;
 
-            // Check if label is within camera view and in front of the camera
-            const isVisible = Math.abs(screenPosition.x) <= 1 && Math.abs(screenPosition.y) <= 1 && screenPosition.z > 0;
+            const screenPosition = worldPosition.project(camera);
 
-            if (isVisible && player.mesh.visible) { // Show label only if mesh is visible and on screen
+            // Check if label is within screen bounds and in front of camera
+            const isVisible = Math.abs(screenPosition.x) <= 1 &&
+                              Math.abs(screenPosition.y) <= 1 &&
+                              screenPosition.z > 0;
+
+            if (isVisible && player.mesh.visible) { // Only show if player mesh is visible
+                // Convert normalized screen coordinates to pixel coordinates
                 const x = (screenPosition.x * 0.5 + 0.5) * window.innerWidth;
-                const y = (-screenPosition.y * 0.5 + 0.5) * window.innerHeight; // Invert Y-axis
+                const y = (-screenPosition.y * 0.5 + 0.5) * window.innerHeight; // Y is inverted
+
+                // Set label position and display
                 label.style.left = `${x}px`;
                 label.style.top = `${y}px`;
                 label.style.display = 'block';
             } else {
-                label.style.display = 'none'; // Hide label if off-screen or mesh is hidden
+                // Hide label if off-screen or behind camera
+                label.style.display = 'none';
             }
         }
 
         function addOrUpdateProjectile(projData) {
-            // Adds or updates a projectile mesh
-            if (!projData || !projData.id || projectiles[projData.id]) return; // Basic validation/duplicate check
+            // Only add if it doesn't exist already
+            if (!projData || !projData.id || projectiles[projData.id]) return;
 
-            const projGeometry = new THREE.SphereGeometry(0.06, 6, 6); // Small sphere
+            const projGeometry = new THREE.SphereGeometry(0.06, 6, 6);
             const projMaterial = new THREE.MeshBasicMaterial({ color: 0xffff00 }); // Bright yellow
             const mesh = new THREE.Mesh(projGeometry, projMaterial);
             mesh.position.set(projData.x, projData.y, projData.z);
             scene.add(mesh);
 
             projectiles[projData.id] = {
-                id: projData.id, mesh: mesh,
-                vx: projData.vx, vy: projData.vy, vz: projData.vz,
-                spawnTime: Date.now() // Store spawn time for client-side cleanup
+                id: projData.id,
+                mesh: mesh,
+                vx: projData.vx,
+                vy: projData.vy,
+                vz: projData.vz,
+                spawnTime: Date.now() // Store spawn time for client-side lifetime check if needed
             };
         }
 
         function removeProjectile(projId) {
-            // Removes a projectile mesh from the scene and local state
             const proj = projectiles[projId];
             if (proj) {
                 scene.remove(proj.mesh);
-                proj.mesh.geometry.dispose();
-                proj.mesh.material.dispose();
+                // Dispose geometry and material
+                if (proj.mesh.geometry) proj.mesh.geometry.dispose();
+                if (proj.mesh.material) proj.mesh.material.dispose();
                 delete projectiles[projId];
             }
         }
 
-        // Updates the ammo display in the HUD
         function updateHUD(magazine, ammo) {
             if (ammoElement) {
                 ammoElement.textContent = `${magazine} / ${ammo}`;
             }
         }
 
-        // Updates the health hearts display
         function updateHealthHearts() {
             if (!healthHeartsElement) return;
             healthHeartsElement.innerHTML = ''; // Clear existing hearts
             const currentHealth = localPlayerStats?.health ?? 0;
-             // console.log(`[updateHealthHearts] Current health: ${currentHealth}`); // DEBUG LOG
-            const numFullHearts = Math.ceil(Math.max(0, currentHealth) / 10); // 1 heart per 10 HP
-             // console.log(`    Calculated full hearts: ${numFullHearts}`); // DEBUG LOG
+             // Calculate number of full hearts (1 heart = 10 health)
+            const numFullHearts = Math.ceil(Math.max(0, currentHealth) / (START_HEALTH / 10)); // Use START_HEALTH for scaling
+            const totalHearts = 10; // Always show 10 total slots
 
-            for (let i = 0; i < 10; i++) { // Always display 10 hearts
+            for (let i = 0; i < totalHearts; i++) {
                 const heartDiv = document.createElement('div');
                 heartDiv.classList.add('heart');
-                if (i < numFullHearts) {
-                    heartDiv.classList.add('heart-full'); // Add full heart class
-                } else {
-                    heartDiv.classList.add('heart-empty'); // Add empty heart class
-                }
+                heartDiv.classList.add(i < numFullHearts ? 'heart-full' : 'heart-empty');
                 healthHeartsElement.appendChild(heartDiv);
             }
         }
 
-        // Checks if the reload prompt should be shown
         function checkReloadPrompt() {
+            // Don't show if reloading, dead, or not connected
             if (isReloading || isDead || !localPlayerId) {
-                hideReloadStatus(); // Hide if reloading, dead, or disconnected
+                hideReloadStatus(); // Ensure it's hidden
                 return;
             }
-
             // Show prompt if magazine is empty but reserve ammo exists
             if (localPlayerStats.magazine === 0 && localPlayerStats.ammo > 0) {
                 showReloadPrompt();
             } else {
-                // Hide prompt if not reloading (covers case where mag is full or no reserve)
+                 // Hide prompt/status if not actively reloading
                 if (!isReloading) {
-                    hideReloadStatus();
-                }
+                     hideReloadStatus();
+                 }
             }
         }
 
-        // Shows only the "Reload (R)" text prompt
         function showReloadPrompt() {
             if (!reloadStatusElement) return;
             reloadTextElement.textContent = "Reload (R)";
-            reloadProgressBarContainer.style.display = 'none'; // Hide progress bar
+            reloadProgressBarContainer.style.display = 'none'; // Hide progress bar for prompt
             reloadStatusElement.style.display = 'block';
         }
 
-        // Shows "Reloading..." text and progress bar
         function showReloadingStatus() {
             if (!reloadStatusElement) return;
-            isReloading = true; // Set reloading flag
-            reloadStartTime = Date.now(); // Record start time
+            isReloading = true;
+            reloadStartTime = Date.now();
             reloadTextElement.textContent = "Reloading...";
             reloadProgressBar.style.width = '0%'; // Reset progress bar
-            reloadProgressBarContainer.style.display = 'block'; // Show progress bar container
+            reloadProgressBarContainer.style.display = 'block'; // Show progress bar
             reloadStatusElement.style.display = 'block';
         }
 
-        // Hides the entire reload status element
         function hideReloadStatus() {
             if (reloadStatusElement) {
                 reloadStatusElement.style.display = 'none';
             }
         }
 
-        // Updates the reload progress bar visually
         function updateReloadProgress(delta) {
+            // Only update if actively reloading and status is visible
             if (!isReloading || !reloadStatusElement || reloadStatusElement.style.display === 'none') return;
 
             const elapsedTime = Date.now() - reloadStartTime;
             const progress = Math.min(100, (elapsedTime / RELOAD_DURATION) * 100);
             reloadProgressBar.style.width = `${progress}%`;
 
-            // Note: Actual reload completion is handled by server sending 'ammo_update'
+            // Note: Reload completion is handled by the server sending an 'ammo_update'
         }
 
-        // Shows the death screen overlay
         function showDeathScreen() {
             if (!deathScreenElement) return;
-            isDead = true; // Set dead flag
-            killerNameElement.textContent = killerName; // Display killer name
-            respawnCountdown = RESPAWN_TIME_SECONDS; // Start countdown timer
+            isDead = true;
+            killerNameElement.textContent = killerName; // Update killer name
+            respawnCountdown = RESPAWN_TIME_SECONDS; // Reset countdown
             respawnTimerElement.textContent = `Respawn in: ${Math.ceil(respawnCountdown)}s`;
-            deathScreenElement.style.display = 'flex'; // Show the overlay
+            deathScreenElement.style.display = 'flex'; // Show the screen
             if (controls.isLocked) {
-                controls.unlock(); // Unlock cursor on death
+                controls.unlock(); // Unlock pointer on death
             }
-            moveForward = moveBackward = moveLeft = moveRight = false; // Stop any movement
-            hideReloadStatus(); // Hide reload prompt/bar
+            // Stop movement input
+            moveForward = moveBackward = moveLeft = moveRight = false;
+            hideReloadStatus(); // Hide reload status/prompt on death
         }
 
-        // Hides the death screen overlay
         function hideDeathScreen() {
             if (deathScreenElement) {
                 deathScreenElement.style.display = 'none';
             }
         }
 
-        // Handles key down events for movement, jumping, reloading, scoreboard
         function onKeyDown(event) {
-            // Ignore most input if dead (allow Tab for scoreboard, Escape for menu/unlock)
-            if (isDead && event.code !== 'Tab' && event.code !== 'Escape') return;
-            // Ignore movement keys if cursor isn't locked
+            // Ignore movement/shooting keys if dead, allow Tab/Escape
+            if (isDead && !['Tab', 'Escape'].includes(event.code)) return;
+            // Ignore most keys if pointer is not locked
             if (!controls.isLocked && !['Tab', 'Escape'].includes(event.code)) return;
 
             switch (event.code) {
@@ -1128,67 +937,71 @@
                 case 'KeyS': case 'ArrowDown': moveBackward = true; break;
                 case 'KeyD': case 'ArrowRight': moveRight = true; break;
                 case 'Space':
-                    if (canJump && !isDead) { // Allow jump only if alive and able
+                    // Allow jump only if grounded and not dead
+                    if (canJump && !isDead) {
                         playerVelocity.y = jumpVelocity;
-                        canJump = false;
+                        canJump = false; // Prevent double jump until grounded again
                     }
                     break;
-                case 'KeyR': // Reload
-                    // Check conditions: connected, alive, not already reloading, mag not full, reserve ammo exists
-                    if (ws && ws.readyState === WebSocket.OPEN && localPlayerId && !isDead && !isReloading &&
-                        localPlayerStats.magazine < MAX_MAGAZINE && localPlayerStats.ammo > 0) {
+                case 'KeyR':
+                    // Initiate reload if conditions met
+                    if (ws && ws.readyState === WebSocket.OPEN && localPlayerId &&
+                        !isDead && !isReloading &&
+                        localPlayerStats.magazine < MAX_MAGAZINE && localPlayerStats.ammo > 0)
+                    {
                         console.log("Sending reload request...");
                         ws.send(JSON.stringify({ type: 'request_reload' }));
-                        showReloadingStatus(); // Show reloading UI immediately
+                        showReloadingStatus(); // Show client-side indicator immediately
                     }
                     break;
-                case 'Tab': // Scoreboard
-                    event.preventDefault(); // Prevent default browser tab behavior
+                case 'Tab':
+                    event.preventDefault(); // Prevent tabbing out of the game
                     showScoreboard();
                     break;
+                // Allow Escape to unlock pointer (handled by PointerLockControls)
             }
         }
 
-        // Handles key up events to stop movement
         function onKeyUp(event) {
-            // No need to check isDead here, releasing key should always stop movement intent
+            // Update movement flags on key release
             switch (event.code) {
                 case 'KeyW': case 'ArrowUp': moveForward = false; break;
                 case 'KeyA': case 'ArrowLeft': moveLeft = false; break;
                 case 'KeyS': case 'ArrowDown': moveBackward = false; break;
                 case 'KeyD': case 'ArrowRight': moveRight = false; break;
-                case 'Tab': // Hide scoreboard on key release
+                case 'Tab':
                     hideScoreboard();
                     break;
             }
         }
 
-        // Handles mouse down events for shooting
         function onMouseDown(event) {
-            // Shoot on left click if cursor locked, alive, and not reloading
+            // Shoot on left click if pointer locked, alive, and not reloading
             if (controls.isLocked && event.button === 0 && !isDead && !isReloading) {
                 shoot();
             }
         }
 
-        // Handles the shooting logic
         function shoot() {
-            // Check conditions: connected, alive, has ammo in mag, not reloading
-            if (!ws || ws.readyState !== WebSocket.OPEN || !localPlayerId || localPlayerStats.health <= 0 || localPlayerStats.magazine <= 0 || isReloading) {
-                // If out of ammo in mag but has reserve, show prompt
+            // Check conditions before shooting
+            if (!ws || ws.readyState !== WebSocket.OPEN || !localPlayerId ||
+                localPlayerStats.health <= 0 || localPlayerStats.magazine <= 0 || isReloading)
+            {
+                 // If out of ammo but has reserve, show reload prompt
                 if (localPlayerStats.magazine <= 0 && localPlayerStats.ammo > 0 && !isReloading && !isDead) {
-                    console.log("Empty magazine - show prompt!");
                     showReloadPrompt();
                 }
-                return; // Cannot shoot
+                // TODO: Add out-of-ammo sound effect?
+                return;
             }
 
-            // Calculate projectile direction and start position
+            // Get camera direction and position for projectile origin
             const direction = new THREE.Vector3();
-            camera.getWorldDirection(direction); // Direction camera is facing
+            camera.getWorldDirection(direction);
             const startPos = new THREE.Vector3();
-            camera.getWorldPosition(startPos); // Position of the camera
-            startPos.addScaledVector(direction, 0.6); // Start slightly in front of camera
+            camera.getWorldPosition(startPos);
+            // Offset start position slightly forward from camera to avoid self-collision
+            startPos.addScaledVector(direction, 0.6);
 
             // Send shoot message to server
             ws.send(JSON.stringify({
@@ -1199,58 +1012,60 @@
                 }
             }));
 
-            // --- Client-side prediction/effects ---
+            // --- Client-side prediction (optional but good for responsiveness) ---
+            // Decrement local ammo immediately
             if (localPlayerStats.magazine > 0) {
-                 localPlayerStats.magazine--; // Decrease ammo locally for immediate feedback
-                 updateHUD(localPlayerStats.magazine, localPlayerStats.ammo);
-                 checkReloadPrompt(); // Check if empty mag prompt needed now
+                localPlayerStats.magazine--;
+                updateHUD(localPlayerStats.magazine, localPlayerStats.ammo);
+                checkReloadPrompt(); // Check if reload needed after shot
             }
-
-            // Muzzle flash effect
+            // Play shooting sound effect
+            // TODO: Add audio playback for shooting sound
+            // Trigger muzzle flash visual effect
             if (muzzleFlash) {
-                muzzleFlash.intensity = 2.0; // Turn flash on
-                setTimeout(() => { muzzleFlash.intensity = 0; }, 60); // Turn off after short duration
+                muzzleFlash.intensity = 2.0; // Make flash bright
+                // Set timer to turn off flash quickly
+                setTimeout(() => {
+                    if (muzzleFlash) muzzleFlash.intensity = 0;
+                }, 60); // Flash duration in ms
             }
-            // TODO: Add recoil effect, sound effect
         }
 
-        // Shows the scoreboard
         function showScoreboard() {
-            if (!localPlayerId) return; // Don't show if not connected
-            updateScoreboard(); // Update data before showing
+            if (!localPlayerId || !scoreboardElement) return;
+            updateScoreboard(); // Refresh data before showing
             scoreboardElement.style.display = 'block';
         }
 
-        // Hides the scoreboard
         function hideScoreboard() {
-            scoreboardElement.style.display = 'none';
+            if (scoreboardElement) {
+                scoreboardElement.style.display = 'none';
+            }
         }
 
-        // Updates the scoreboard table content
         function updateScoreboard() {
             if (!scoreboardTableBody) return;
             scoreboardTableBody.innerHTML = ''; // Clear previous entries
 
-            // Create a list of players including local player
             const playerList = [];
+            // Add local player first if connected
             if (localPlayerId) {
-                // Get local player's name (might be from init or from players object if updated)
                  const localName = localPlayerStats.name || players[localPlayerId]?.name || "You";
-                playerList.push({
-                    id: localPlayerId,
-                    name: localName,
-                    kills: localPlayerStats.kills,
-                    deaths: localPlayerStats.deaths,
-                    isLocal: true
-                });
+                 playerList.push({
+                     id: localPlayerId,
+                     name: localName,
+                     kills: localPlayerStats.kills,
+                     deaths: localPlayerStats.deaths,
+                     isLocal: true
+                 });
             }
-            // Add other players from the players object
+            // Add other players
             for (const id in players) {
                 if (id !== localPlayerId) {
                     const p = players[id];
                     playerList.push({
                         id: id,
-                        name: p.name || `Player_${id.substring(0, 4)}`, // Fallback name
+                        name: p.name || `Player_${id.substring(0, 4)}`,
                         kills: p.kills,
                         deaths: p.deaths,
                         isLocal: false
@@ -1261,11 +1076,11 @@
             // Sort players by kills (descending)
             playerList.sort((a, b) => b.kills - a.kills);
 
-            // Populate the HTML table
+            // Populate table rows
             playerList.forEach(p => {
                 const row = scoreboardTableBody.insertRow();
                 if (p.isLocal) {
-                    row.classList.add('local-player'); // Highlight local player
+                    row.classList.add('local-player'); // Highlight local player row
                 }
                 row.insertCell(0).textContent = p.name;
                 row.insertCell(1).textContent = p.kills;
@@ -1273,182 +1088,190 @@
             });
         }
 
-        // Handles window resize events
         function onWindowResize() {
+            // Update camera aspect ratio and renderer size
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
+            // Labels might need repositioning on resize, handled in updatePlayerLabel
         }
 
-        // --- Movement and Collision Variables ---
-        const moveDirection = new THREE.Vector3(); // Intended move direction (WASD)
-        const rightDirection = new THREE.Vector3(); // Vector pointing right relative to camera yaw
-        const forwardDirection = new THREE.Vector3(); // Vector pointing forward relative to camera yaw
-        const playerCollider = new THREE.Box3(); // Player's collision box (simplified)
-        const collisionCheckVector = new THREE.Vector3(); // Helper vector for collision checks
+        // --- Movement & Physics Variables ---
+        const moveDirection = new THREE.Vector3();
+        const rightDirection = new THREE.Vector3();
+        const forwardDirection = new THREE.Vector3();
+        const playerCollider = new THREE.Box3(); // For obstacle collision
+        const collisionCheckVector = new THREE.Vector3(); // Reusable vector for checks
 
-        // --- Main Animation Loop ---
         function animate() {
-            requestAnimationFrame(animate); // Schedule next frame
-            const delta = Math.min(clock.getDelta(), 0.1); // Get time since last frame, capped
+            requestAnimationFrame(animate); // Loop animation
+            const delta = Math.min(clock.getDelta(), 0.1); // Get time delta, cap for stability
 
-            // Update projectiles (client-side movement)
+            // --- Update Projectiles ---
             for (const id in projectiles) {
                 const p = projectiles[id];
+                // Move projectile based on its velocity and delta time
                 p.mesh.position.x += p.vx * delta;
                 p.mesh.position.y += p.vy * delta;
                 p.mesh.position.z += p.vz * delta;
-                // Basic client-side cleanup for old projectiles
-                if (Date.now() - p.spawnTime > 2500) { // Slightly longer than server lifetime
-                    removeProjectile(id);
-                }
+                // Optional: Client-side removal after timeout (server is authoritative)
+                // if (Date.now() - p.spawnTime > 2500) { // Match server lifetime + buffer
+                //     removeProjectile(id);
+                // }
             }
 
-            // Update reload progress bar if reloading
+            // --- Update Local State Timers ---
             if (isReloading) {
                 updateReloadProgress(delta);
             }
-
-            // Update respawn timer and death screen effects
             if (isDead && respawnCountdown > 0) {
                 respawnCountdown -= delta;
                 respawnTimerElement.textContent = `Respawn in: ${Math.max(0, Math.ceil(respawnCountdown))}s`;
-                // Simple camera drop effect on death
+                // Optional: Sink player model slowly while dead
                 const playerObject = controls.getObject();
-                if (playerObject.position.y > 0.5) {
-                    playerObject.position.y -= 2.0 * delta * Math.max(0.1, playerObject.position.y); // Faster drop initially
+                if (playerObject.position.y > 0.5) { // Don't sink below ground
+                    playerObject.position.y -= 1.0 * delta; // Sink rate
                 }
             }
 
-            // --- Local Player Movement and Collision ---
-            if (controls.isLocked === true && localPlayerId && !isDead) { // Move only if cursor locked, connected, and alive
-                const playerObject = controls.getObject(); // The camera/controls group
+            // --- Handle Player Movement & Input ---
+            if (controls.isLocked === true && localPlayerId && !isDead) {
+                const playerObject = controls.getObject(); // The camera group
 
-                // --- Vertical Movement (Gravity & Jump) ---
-                playerVelocity.y -= gravity * delta; // Apply gravity
-                playerObject.position.y += playerVelocity.y * delta; // Apply vertical velocity
+                // Apply gravity
+                playerVelocity.y -= gravity * delta;
+                // Update vertical position based on velocity
+                playerObject.position.y += playerVelocity.y * delta;
 
-                // Simple ground collision
+                // Ground check and reset jump
                 if (playerObject.position.y < playerEyeLevel) {
                     playerVelocity.y = 0; // Stop falling
-                    playerObject.position.y = playerEyeLevel; // Snap to ground
+                    playerObject.position.y = playerEyeLevel; // Correct position to eye level
                     canJump = true; // Allow jumping again
                 }
 
-                // --- Horizontal Movement (WASD) ---
-                // Apply friction/damping
+                // Apply friction/damping to horizontal movement
                 playerVelocity.x -= playerVelocity.x * 10.0 * delta;
                 playerVelocity.z -= playerVelocity.z * 10.0 * delta;
 
-                // Calculate movement direction based on input keys
-                moveDirection.z = Number(moveForward) - Number(moveBackward); // +1 forward, -1 backward
-                moveDirection.x = Number(moveRight) - Number(moveLeft);     // +1 right, -1 left
-                moveDirection.normalize(); // Prevent faster diagonal movement
+                // Calculate movement direction based on input flags
+                // Z axis: W = +1, S = -1
+                // X axis: D = +1, A = -1 (Relative to the 'right' vector)
+                moveDirection.z = Number(moveForward) - Number(moveBackward);
+                moveDirection.x = Number(moveRight) - Number(moveLeft);
+                moveDirection.normalize(); // Ensure consistent speed regardless of diagonal movement
 
-                // Get camera's forward and right directions (ignoring pitch)
+                // Get camera forward direction (on XZ plane)
                 camera.getWorldDirection(forwardDirection);
-                forwardDirection.y = 0; // Project onto XZ plane
+                forwardDirection.y = 0; // Ignore vertical component for movement
                 forwardDirection.normalize();
-                rightDirection.crossVectors(camera.up, forwardDirection).normalize(); // Calculate right vector
+
+                // Calculate right direction (perpendicular to forward)
+                // Use cross product: (Forward x Up) gives Right
+                rightDirection.crossVectors(forwardDirection, camera.up).normalize();
 
                 // Calculate target velocity based on input and directions
                 const targetVelocityX = (forwardDirection.x * moveDirection.z + rightDirection.x * moveDirection.x) * playerSpeed;
                 const targetVelocityZ = (forwardDirection.z * moveDirection.z + rightDirection.z * moveDirection.x) * playerSpeed;
 
-                // Smoothly accelerate/decelerate towards target velocity
-                const accelerationFactor = delta * 10.0; // Controls how quickly player reaches full speed
+                // Smoothly accelerate towards target velocity (lerp)
+                const accelerationFactor = delta * 10.0; // How quickly player accelerates
                 playerVelocity.x = THREE.MathUtils.lerp(playerVelocity.x, targetVelocityX, accelerationFactor);
                 playerVelocity.z = THREE.MathUtils.lerp(playerVelocity.z, targetVelocityZ, accelerationFactor);
 
-                // Calculate movement vector for this frame
+                // Calculate actual movement distance for this frame
                 const moveX = playerVelocity.x * delta;
                 const moveZ = playerVelocity.z * delta;
 
-                // --- Collision Detection BEFORE Applying Movement ---
+                // --- Simple Collision Detection ---
                 let collisionX = false;
                 let collisionZ = false;
+                const currentPos = playerObject.position;
 
-                // Update player's collider based on *current* position
-                playerCollider.setFromCenterAndSize(
-                    playerObject.position,
-                    new THREE.Vector3(playerRadius * 2, playerHeight, playerRadius * 2) // Use physics radius
-                );
+                // Update player collider bounding box for current position
+                // Centered at feet level approx.
+                const colliderCenter = currentPos.clone().setY(currentPos.y - playerEyeLevel + playerHeight / 2);
+                playerCollider.setFromCenterAndSize(colliderCenter, new THREE.Vector3(playerRadius * 2, playerHeight, playerRadius * 2));
 
-                // 1. Collision with obstacles (boxes)
+                // 1. Check against static obstacles
                 obstacles.forEach(obstacle => {
-                    // Check collision if moving along X
+                    if (!obstacle.userData.boundingBox) return; // Skip if no bounding box
+                    // Check X movement
                     const colliderX = playerCollider.clone().translate(new THREE.Vector3(moveX, 0, 0));
                     if (colliderX.intersectsBox(obstacle.userData.boundingBox)) {
                         collisionX = true;
                     }
-                    // Check collision if moving along Z
+                    // Check Z movement
                     const colliderZ = playerCollider.clone().translate(new THREE.Vector3(0, 0, moveZ));
                     if (colliderZ.intersectsBox(obstacle.userData.boundingBox)) {
                         collisionZ = true;
                     }
                 });
 
-                // 2. Collision with other players (simple distance check)
+                // 2. Check against other players (simple radius check)
                 for (const pId in players) {
-                    if (pId === localPlayerId || !players[pId].mesh.visible) continue; // Skip self and dead players
+                    if (pId === localPlayerId || !players[pId].mesh.visible) continue; // Skip self and invisible players
 
-                    const otherPlayerPos = players[pId].mesh.position; // Feet position of other player
-                    const collisionRadiusSq = (playerRadius * 2.5) ** 2; // Use physics radius for player-player
+                    // Use the other player's mesh position (which is at their feet level)
+                    const otherPlayerFeetPos = players[pId].mesh.position;
+                    // Check distance squared for efficiency
+                    const collisionRadiusSq = (playerRadius * 2) ** 2; // Use combined radii
 
-                    // Check potential collision along X
-                    collisionCheckVector.copy(playerObject.position).add(new THREE.Vector3(moveX, 0, 0));
-                    if (collisionCheckVector.distanceToSquared(otherPlayerPos) < collisionRadiusSq) {
+                    // Check X movement collision
+                    collisionCheckVector.copy(colliderCenter).add(new THREE.Vector3(moveX, 0, 0)); // Check future X position center
+                    // Adjust Y of other player for comparison (feet vs feet approx)
+                    if (collisionCheckVector.distanceToSquared(otherPlayerFeetPos) < collisionRadiusSq) {
                         collisionX = true;
                     }
-                    // Check potential collision along Z
-                    collisionCheckVector.copy(playerObject.position).add(new THREE.Vector3(0, 0, moveZ));
-                    if (collisionCheckVector.distanceToSquared(otherPlayerPos) < collisionRadiusSq) {
+
+                    // Check Z movement collision
+                    collisionCheckVector.copy(colliderCenter).add(new THREE.Vector3(0, 0, moveZ)); // Check future Z position center
+                    if (collisionCheckVector.distanceToSquared(otherPlayerFeetPos) < collisionRadiusSq) {
                         collisionZ = true;
                     }
                 }
 
-                // --- Apply Movement (Slide along walls) ---
+
+                // Apply movement only if no collision detected on that axis
                 if (!collisionX) {
-                    playerObject.position.x += moveX; // Apply X movement if no collision
+                    playerObject.position.x += moveX;
                 } else {
-                    playerVelocity.x = 0; // Stop X velocity on collision
+                    playerVelocity.x = 0; // Stop movement on collision
                 }
                 if (!collisionZ) {
-                    playerObject.position.z += moveZ; // Apply Z movement if no collision
+                    playerObject.position.z += moveZ;
                 } else {
-                    playerVelocity.z = 0; // Stop Z velocity on collision
+                    playerVelocity.z = 0; // Stop movement on collision
                 }
 
                 // --- Send Player Update to Server ---
-                // (Could be optimized to send less frequently or only on significant changes)
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    const controlObject = controls.getObject();
-                    const yaw = controlObject.rotation.y;
+                    const controlObject = controls.getObject(); // Camera group
+                    const yaw = controlObject.rotation.y; // Rotation around Y axis
+                    // Pitch is rotation of the camera itself (child of controlObject) around X axis
                     let pitch = 0;
-                    // Safely get pitch from camera (first child of controls object)
                     if (controlObject.children && controlObject.children.length > 0 && controlObject.children[0]) {
-                        pitch = controlObject.children[0].rotation.x;
+                         pitch = controlObject.children[0].rotation.x;
                     }
-
                     ws.send(JSON.stringify({
                         type: 'player_update',
                         payload: {
-                            // Server uses x, z and sets y=1. Send current calculated position.
-                            position: { x: playerObject.position.x, y: 1.0, z: playerObject.position.z },
+                            position: { x: playerObject.position.x, y: playerObject.position.y, z: playerObject.position.z },
                             rotation: { pitch: pitch, yaw: yaw }
                         }
                     }));
                 }
-            }
+            } // End if (controls.isLocked)
 
-            // Update labels for remote players
+            // --- Update Player Labels ---
+            // Update labels for all *other* visible players
             for (const id in players) {
-                if (id !== localPlayerId && players[id].mesh.visible) { // Update only visible remote players
+                if (id !== localPlayerId && players[id].mesh.visible) {
                     updatePlayerLabel(players[id], players[id].health);
                 }
             }
 
-            // Render the scene
+            // --- Render Scene ---
             renderer.render(scene, camera);
         }
 
