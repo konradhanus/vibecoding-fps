@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prototyp FPS WebGL</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #333; color: white; font-family: sans-serif; }
+        canvas { display: block; }
+        #hud {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 5px;
+            color: white;
+            font-size: 18px;
+        }
+        #crosshair {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 4px;
+            height: 4px;
+            background-color: lime;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none; /* Nie blokuje kliknięć myszą */
+        }
+         .player-label {
+            position: absolute;
+            background-color: rgba(0, 0, 0, 0.6);
+            color: white;
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-size: 12px;
+            white-space: nowrap;
+            pointer-events: none;
+            transform: translateX(-50%); /* Wyśrodkowanie etykiety */
+            text-align: center;
+        }
+        .health-bar {
+            height: 5px;
+            background-color: red;
+            margin-top: 2px;
+        }
+         .health-bar-inner {
+            height: 100%;
+            background-color: lime;
+            width: 100%; /* Domyślnie pełne */
+         }
+    </style>
+</head>
+<body>
+    <div id="hud">
+        Zdrowie: <span id="health">100</span><br>
+        Amunicja: <span id="ammo">30 / 100</span>
+    </div>
+    <div id="crosshair">+</div>
+    <div id="player-labels"></div> 
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+        let scene, camera, renderer, controls;
+        let playerVelocity = new THREE.Vector3();
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+        let canJump = false; // Prosta flaga skoku
+
+        let localPlayerId = null; // ID tego klienta
+        let players = {}; // { id: { mesh: Mesh, labelElement: HTMLElement, healthBarElement: HTMLElement, ...serverData } }
+        let projectiles = {}; // { id: { mesh: Mesh, ...serverData } }
+
+        const clock = new THREE.Clock();
+        const playerHeight = 1.8;
+        const playerSpeed = 5.0;
+        const gravity = 9.8;
+        const jumpVelocity = 5.0;
+        const playerCapsuleRadius = 0.4; // Dla kolizji z innymi graczami
+
+        let ws; // WebSocket
+
+        init();
+        connectWebSocket();
+        animate();
+
+        function init() {
+            // Scena
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB); // Jasnoniebieskie niebo
+            scene.fog = new THREE.Fog(0x87CEEB, 0, 75);
+
+            // Kamera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.y = playerHeight; // Startowa wysokość oczu
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.shadowMap.enabled = true; // Włącz cienie (proste)
+            document.body.appendChild(renderer.domElement);
+
+            // Kontroler (Pointer Lock)
+            controls = new PointerLockControls(camera, document.body);
+            scene.add(controls.getObject()); // Dodaj obiekt kamery do kontrolera
+
+            document.addEventListener('click', () => {
+                controls.lock();
+            });
+
+             controls.addEventListener('lock', () => {
+                 console.log('Pointer locked');
+                 // Można ukryć instrukcje itp.
+             });
+
+             controls.addEventListener('unlock', () => {
+                 console.log('Pointer unlocked');
+                 // Można pokazać menu itp.
+             });
+
+             // Światła
+             const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+             scene.add(ambientLight);
+
+             const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+             dirLight.position.set(5, 10, 7);
+             dirLight.castShadow = true; // Światło rzuca cień
+             scene.add(dirLight);
+
+             // Podłoże
+             const groundGeometry = new THREE.PlaneGeometry(100, 100);
+             const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x777777, side: THREE.DoubleSide });
+             const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+             ground.rotation.x = -Math.PI / 2;
+             ground.receiveShadow = true; // Podłoże odbiera cień
+             scene.add(ground);
+
+            // Proste przeszkody (kostki)
+            const boxGeometry = new THREE.BoxGeometry(2, 2, 2);
+            const boxMaterial = new THREE.MeshStandardMaterial({ color: 0x00ff00 });
+            for(let i=0; i< 5; ++i) {
+                 const box = new THREE.Mesh(boxGeometry, boxMaterial);
+                 box.position.set(Math.random() * 20 - 10, 1, Math.random() * 20 - 10);
+                 box.castShadow = true;
+                 box.receiveShadow = true;
+                 scene.add(box);
+                 // TODO: Dodanie kolizji z tymi obiektami
+            }
+
+
+            // Obsługa klawiatury
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+
+            // Obsługa strzelania
+            document.addEventListener('mousedown', onMouseDown);
+
+            // Responsywność okna
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function connectWebSocket() {
+            // Użyj `window.location.hostname` aby działało zarówno lokalnie jak i na serwerze docelowym
+             const wsUrl = `ws://localhost:8080`;
+             console.log(`Łączenie z ${wsUrl}...`);
+             ws = new WebSocket(wsUrl);
+
+
+            ws.onopen = () => {
+                console.log("Połączono z serwerem WebSocket.");
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const message = JSON.parse(event.data);
+                    handleServerMessage(message);
+                } catch (error) {
+                    console.error("Błąd przetwarzania wiadomości od serwera:", error, "Otrzymano:", event.data);
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error("Błąd WebSocket:", error);
+                updateHUD("Błąd połączenia", "", ""); // Informacja dla gracza
+            };
+
+            ws.onclose = () => {
+                console.log("Rozłączono z serwerem WebSocket.");
+                updateHUD("Rozłączono", "", "");
+                // Można dodać logikę ponownego łączenia
+                // Usuń wszystkich innych graczy ze sceny
+                 for (const id in players) {
+                     removePlayer(id);
+                 }
+                 players = {};
+                 // Usuń wszystkie pociski
+                  for (const id in projectiles) {
+                      removeProjectile(id);
+                  }
+                  projectiles = {};
+            };
+        }
+
+        function handleServerMessage(message) {
+            // console.log("Otrzymano:", message); // Debugowanie
+            switch (message.type) {
+                case 'init':
+                    localPlayerId = message.payload.id;
+                    console.log(`Otrzymano ID: ${localPlayerId}`);
+                    // Załaduj stan gry (inni gracze, pociski)
+                    for (const id in message.payload.players) {
+                        if (id !== localPlayerId) {
+                            addOrUpdatePlayer(message.payload.players[id]);
+                        } else {
+                            // Ustaw pozycję startową lokalnego gracza (jeśli serwer ją nadpisuje)
+                            const pData = message.payload.players[id];
+                            controls.getObject().position.set(pData.x, playerHeight, pData.z);
+                            updateHUD(pData.health, pData.magazine, pData.ammo);
+                        }
+                    }
+                     // Dodaj istniejące pociski
+                     message.payload.projectiles?.forEach(pData => {
+                         addOrUpdateProjectile(pData);
+                     });
+                    break;
+                case 'player_joined':
+                    if (message.payload.id !== localPlayerId) {
+                        addOrUpdatePlayer(message.payload);
+                    }
+                    break;
+                case 'player_left':
+                    if (message.payload.id !== localPlayerId) {
+                        removePlayer(message.payload.id);
+                    }
+                    break;
+                case 'game_state':
+                    // Aktualizacja wszystkich graczy
+                    for (const id in message.payload.players) {
+                        const playerData = message.payload.players[id];
+                        if (id === localPlayerId) {
+                            // Aktualizuj HUD lokalnego gracza na podstawie danych serwera (np. po trafieniu)
+                            // Można dodać logikę sprawdzania, czy stan się zmienił
+                            updateHUD(playerData.health, playerData.magazine, playerData.ammo);
+                             // Sprawdzenie czy gracz "umarł"
+                             if (playerData.health <= 0 && controls.isLocked) {
+                                 // Można zablokować strzelanie/ruch i pokazać ekran śmierci
+                                 console.log("Zginąłeś!");
+                                 // Na razie nic nie robimy, czekamy na respawn
+                             }
+                        } else {
+                            addOrUpdatePlayer(playerData);
+                        }
+                    }
+                     // Usuwanie pocisków oznaczonych przez serwer
+                     message.payload.removedProjectiles?.forEach(projId => {
+                         removeProjectile(projId);
+                     });
+                      // Aktualizacja pozycji istniejących pocisków (jeśli serwer je śledzi)
+                      // W obecnym kodzie serwera pociski są tworzone i usuwane, nie aktualizowane ciągle.
+                      // Jeśli serwer wysyłałby pozycje pocisków w game_state, tutaj byśmy je aktualizowali.
+
+                     // Obsługa trafień (np. efekty wizualne)
+                     message.payload.hits?.forEach(hit => {
+                         if (hit.targetId === localPlayerId) {
+                             console.log(`Zostałeś trafiony! Zdrowie: ${hit.newHealth}`);
+                             // TODO: Dodać efekt wizualny (np. czerwony ekran)
+                         }
+                         // Aktualizuj pasek życia trafionego gracza (jeśli go widzimy)
+                        if(players[hit.targetId]) {
+                            updatePlayerLabel(players[hit.targetId], hit.newHealth);
+                             if (hit.killed) {
+                                 console.log(`Gracz ${players[hit.targetId]?.name} został pokonany!`);
+                                 // Można dodać animację śmierci lub usunąć model
+                                 // W obecnej wersji po prostu czeka na respawn
+                             }
+                        }
+                     });
+
+                    break;
+                case 'projectile_created':
+                    addOrUpdateProjectile(message.payload);
+                    break;
+                 case 'ammo_update': // Aktualizacja amunicji po strzale
+                     if (players[localPlayerId]) { // Upewnij się, że gracz lokalny istnieje
+                         updateHUD(players[localPlayerId].health, message.payload.magazine, message.payload.ammo);
+                     }
+                     break;
+                 case 'player_respawned':
+                     const respawnedData = message.payload;
+                     if (respawnedData.id === localPlayerId) {
+                         console.log("Zostałeś odrodzony!");
+                         controls.getObject().position.set(respawnedData.x, playerHeight, respawnedData.z);
+                         playerVelocity.set(0, 0, 0); // Zresetuj prędkość
+                         updateHUD(respawnedData.health, respawnedData.magazine, respawnedData.ammo);
+                         // Odblokuj sterowanie jeśli było zablokowane po śmierci
+                     } else {
+                          // Odrodził się inny gracz - upewnij się, że jest widoczny i ma pełne życie
+                          if (players[respawnedData.id]) {
+                              const player = players[respawnedData.id];
+                              player.mesh.visible = true; // Upewnij się, że jest widoczny
+                              player.mesh.position.set(respawnedData.x, respawnedData.y, respawnedData.z);
+                              player.health = respawnedData.health; // Zaktualizuj lokalny stan zdrowia
+                              updatePlayerLabel(player, respawnedData.health);
+                          } else {
+                              // Jeśli gracz nie istniał wcześniej (rzadkie, ale możliwe), dodaj go
+                              addOrUpdatePlayer({
+                                  id: respawnedData.id,
+                                  name: `Gracz_${respawnedData.id.substring(0,4)}`, // Potrzebne imię z serwera
+                                  x: respawnedData.x, y: respawnedData.y, z: respawnedData.z,
+                                  pitch: 0, yaw: 0, // Domyślne rotacje
+                                  health: respawnedData.health
+                              });
+                          }
+                     }
+                     break;
+            }
+        }
+
+        function addOrUpdatePlayer(playerData) {
+            if (!playerData || !playerData.id) {
+                console.warn("Otrzymano nieprawidłowe dane gracza:", playerData);
+                return;
+            }
+
+            let player = players[playerData.id];
+
+            if (!player) {
+                 // Stwórz reprezentację gracza (prosta kapsuła/cylinder)
+                 const playerGeometry = new THREE.CapsuleGeometry(PLAYER_RADIUS, playerHeight - 2 * PLAYER_RADIUS, 4, 8);
+                 // Losowy kolor dla odróżnienia
+                 const playerMaterial = new THREE.MeshStandardMaterial({ color: Math.random() * 0xffffff });
+                 const mesh = new THREE.Mesh(playerGeometry, playerMaterial);
+                 mesh.castShadow = true;
+                 mesh.position.set(playerData.x, playerData.y, playerData.z); // Użyj Y z serwera
+                 scene.add(mesh);
+
+                 // Etykieta z imieniem i paskiem zdrowia
+                 const labelDiv = document.createElement('div');
+                 labelDiv.className = 'player-label';
+                 labelDiv.innerHTML = `
+                    ${playerData.name || 'Nieznany'}
+                    <div class="health-bar"><div class="health-bar-inner"></div></div>
+                 `;
+                 document.getElementById('player-labels').appendChild(labelDiv);
+                 const healthBarInner = labelDiv.querySelector('.health-bar-inner');
+
+
+                 players[playerData.id] = {
+                    id: playerData.id,
+                    name: playerData.name,
+                    mesh: mesh,
+                    labelElement: labelDiv,
+                    healthBarElement: healthBarInner,
+                    health: playerData.health, // Przechowaj zdrowie lokalnie dla paska
+                    // Inne dane z serwera można tu przechowywać
+                 };
+                 player = players[playerData.id];
+                 console.log(`Dodano gracza: ${playerData.name} (${playerData.id})`);
+
+            } else {
+                 // Aktualizuj pozycję i rotację istniejącego gracza
+                 player.mesh.position.lerp(new THREE.Vector3(playerData.x, playerData.y, playerData.z), 0.5); // Płynne przejście
+                 // Obrót (prosty - tylko wokół osi Y na podstawie yaw)
+                 player.mesh.rotation.y = playerData.yaw; // Ustaw bezpośrednio lub lerp
+                 player.health = playerData.health; // Aktualizuj zdrowie
+            }
+
+             // Ustaw widoczność i pasek życia
+             player.mesh.visible = playerData.health > 0;
+             player.labelElement.style.display = playerData.health > 0 ? 'block' : 'none';
+             if (playerData.health > 0) {
+                 updatePlayerLabel(player, playerData.health);
+             } else {
+                 // Ukryj etykietę martwego gracza
+                 player.labelElement.style.display = 'none';
+             }
+
+        }
+
+         function removePlayer(playerId) {
+             const player = players[playerId];
+             if (player) {
+                 console.log(`Usuwanie gracza: ${player.name} (${playerId})`);
+                 scene.remove(player.mesh);
+                 player.mesh.geometry.dispose();
+                 player.mesh.material.dispose();
+                 if (player.labelElement && player.labelElement.parentNode) {
+                      player.labelElement.parentNode.removeChild(player.labelElement);
+                 }
+                 delete players[playerId];
+             }
+         }
+
+         function updatePlayerLabel(player, health) {
+            if (!player || !player.labelElement) return;
+
+            const healthPerc = Math.max(0, Math.min(100, (health / START_HEALTH) * 100));
+             if (player.healthBarElement) {
+                 player.healthBarElement.style.width = `${healthPerc}%`;
+             }
+
+            // Aktualizacja pozycji etykiety na ekranie
+            const mesh = player.mesh;
+            const label = player.labelElement;
+
+            // Przekształć pozycję 3D na 2D
+            const worldPosition = new THREE.Vector3();
+            mesh.getWorldPosition(worldPosition);
+            // Podnieś etykietę nad głowę gracza
+             worldPosition.y += playerHeight * 0.6; // Dostosuj wysokość offsetu
+            const screenPosition = worldPosition.project(camera);
+
+            // Sprawdź, czy punkt jest widoczny na ekranie
+            const isVisible = Math.abs(screenPosition.x) <= 1 && Math.abs(screenPosition.y) <= 1 && screenPosition.z > 0;
+
+            if (isVisible) {
+                const x = (screenPosition.x * 0.5 + 0.5) * window.innerWidth;
+                const y = (-screenPosition.y * 0.5 + 0.5) * window.innerHeight;
+                label.style.left = `${x}px`;
+                label.style.top = `${y}px`;
+                label.style.display = 'block'; // Pokaż etykietę
+            } else {
+                label.style.display = 'none'; // Ukryj etykietę poza ekranem
+            }
+        }
+
+        function addOrUpdateProjectile(projData) {
+             if (!projData || !projData.id) {
+                 console.warn("Otrzymano nieprawidłowe dane pocisku:", projData);
+                 return;
+             }
+             let proj = projectiles[projData.id];
+
+             if (!proj) {
+                 // Stwórz wizualizację pocisku (mała kulka)
+                 const projGeometry = new THREE.SphereGeometry(0.05, 4, 4);
+                 const projMaterial = new THREE.MeshBasicMaterial({ color: 0xffff00 }); // Żółty
+                 const mesh = new THREE.Mesh(projGeometry, projMaterial);
+                 mesh.position.set(projData.x, projData.y, projData.z);
+                 scene.add(mesh);
+
+                 projectiles[projData.id] = {
+                    id: projData.id,
+                    mesh: mesh,
+                    vx: projData.vx,
+                    vy: projData.vy,
+                    vz: projData.vz,
+                    spawnTime: Date.now() // Czas po stronie klienta dla animacji
+                 };
+                // console.log(`Dodano pocisk: ${projData.id}`);
+             } else {
+                // Teoretycznie serwer mógłby wysyłać aktualizacje pozycji, ale na razie tylko tworzymy
+                 // proj.mesh.position.set(projData.x, projData.y, projData.z);
+             }
+         }
+
+         function removeProjectile(projId) {
+             const proj = projectiles[projId];
+             if (proj) {
+                 scene.remove(proj.mesh);
+                 proj.mesh.geometry.dispose();
+                 proj.mesh.material.dispose();
+                 delete projectiles[projId];
+                // console.log(`Usunięto pocisk: ${projId}`);
+             }
+         }
+
+        function updateHUD(health, magazine, ammo) {
+             const healthElement = document.getElementById('health');
+             const ammoElement = document.getElementById('ammo');
+
+             if (healthElement) healthElement.textContent = Math.max(0, Math.round(health));
+             if (ammoElement) ammoElement.textContent = `${magazine} / ${ammo}`;
+
+             // Zmień kolor zdrowia
+             if (health <= 30) {
+                 healthElement.style.color = 'red';
+             } else if (health <= 60) {
+                 healthElement.style.color = 'orange';
+             } else {
+                  healthElement.style.color = 'lime';
+             }
+        }
+
+        function onKeyDown(event) {
+            switch (event.code) {
+                case 'ArrowUp':
+                case 'KeyW':
+                    moveForward = true;
+                    break;
+                case 'ArrowLeft':
+                case 'KeyA':
+                    moveLeft = true;
+                    break;
+                case 'ArrowDown':
+                case 'KeyS':
+                    moveBackward = true;
+                    break;
+                case 'ArrowRight':
+                case 'KeyD':
+                    moveRight = true;
+                    break;
+                case 'Space':
+                    if (canJump) playerVelocity.y += jumpVelocity;
+                    canJump = false; // Tylko jeden skok na raz
+                    break;
+            }
+        }
+
+        function onKeyUp(event) {
+            switch (event.code) {
+                case 'ArrowUp':
+                case 'KeyW':
+                    moveForward = false;
+                    break;
+                case 'ArrowLeft':
+                case 'KeyA':
+                    moveLeft = false;
+                    break;
+                case 'ArrowDown':
+                case 'KeyS':
+                    moveBackward = false;
+                    break;
+                case 'ArrowRight':
+                case 'KeyD':
+                    moveRight = false;
+                    break;
+            }
+        }
+
+        function onMouseDown(event) {
+             if (controls.isLocked && event.button === 0) { // Lewy przycisk myszy
+                 shoot();
+             }
+        }
+
+        function shoot() {
+            if (!ws || ws.readyState !== WebSocket.OPEN || !localPlayerId) return;
+
+            // Prosty warunek po stronie klienta (serwer i tak zweryfikuje)
+             const ammoText = document.getElementById('ammo')?.textContent || "0 / 0";
+             const currentMagazine = parseInt(ammoText.split('/')[0].trim());
+             if (currentMagazine <= 0) {
+                 console.log("Brak amunicji w magazynku!");
+                 // TODO: Dźwięk pustego magazynka
+                 return;
+             }
+
+
+             // Kierunek strzału - wektor patrzenia kamery
+             const direction = new THREE.Vector3();
+             camera.getWorldDirection(direction);
+
+             // Pozycja startowa pocisku - nieco przed kamerą
+             const startPos = new THREE.Vector3();
+             camera.getWorldPosition(startPos);
+             // Przesuń lekko do przodu, żeby nie kolidował od razu z graczem
+             startPos.addScaledVector(direction, 0.6);
+
+
+             // Wyślij informację o strzale do serwera
+             ws.send(JSON.stringify({
+                 type: 'shoot',
+                 payload: {
+                     direction: { x: direction.x, y: direction.y, z: direction.z },
+                     startPos: { x: startPos.x, y: startPos.y, z: startPos.z }
+                 }
+             }));
+
+             // Opcjonalnie: Efekt wizualny wystrzału (np. błysk) po stronie klienta
+             // Opcjonalnie: Odrzut kamery
+        }
+
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const delta = clock.getDelta();
+
+            // Aktualizacja pocisków (animacja lokalna)
+            for (const id in projectiles) {
+                 const p = projectiles[id];
+                 p.mesh.position.x += p.vx * delta;
+                 p.mesh.position.y += p.vy * delta;
+                 p.mesh.position.z += p.vz * delta;
+
+                 // Proste usuwanie starych pocisków po stronie klienta
+                 // Lepszym rozwiązaniem jest poleganie na serwerze
+                 if (Date.now() - p.spawnTime > 2000) { // np. 2 sekundy
+                     removeProjectile(id);
+                 }
+            }
+
+
+            // Aktualizacja ruchu gracza lokalnego
+            if (controls.isLocked === true) {
+                const playerPosition = controls.getObject().position;
+
+                // Grawitacja
+                playerVelocity.y -= gravity * delta;
+
+                // Tłumienie ruchu poziomego (friction)
+                 playerVelocity.x -= playerVelocity.x * 10.0 * delta;
+                 playerVelocity.z -= playerVelocity.z * 10.0 * delta;
+
+
+                // Kierunek ruchu
+                const direction = new THREE.Vector3();
+                direction.z = Number(moveForward) - Number(moveBackward);
+                direction.x = Number(moveRight) - Number(moveLeft);
+                direction.normalize(); // Aby ruch diagonalny nie był szybszy
+
+                // Zastosuj ruch względem kierunku patrzenia
+                if (moveForward || moveBackward) playerVelocity.z -= direction.z * playerSpeed * delta * 25; // Mnożnik dla responsywności
+                if (moveLeft || moveRight) playerVelocity.x -= direction.x * playerSpeed * delta * 25;
+
+
+                // Zastosuj prędkość do kontrolera
+                controls.moveRight(-playerVelocity.x * delta);
+                controls.moveForward(-playerVelocity.z * delta);
+
+                // Zastosuj prędkość pionową
+                 playerPosition.y += playerVelocity.y * delta;
+
+
+                // Prosta kolizja z podłożem
+                if (playerPosition.y < playerHeight) {
+                    playerVelocity.y = 0;
+                    playerPosition.y = playerHeight;
+                    canJump = true; // Może skoczyć, gdy jest na ziemi
+                }
+
+
+                // Wysłanie aktualizacji pozycji i rotacji do serwera
+                if (ws && ws.readyState === WebSocket.OPEN && localPlayerId) {
+                     const cameraDirection = new THREE.Vector3();
+                     camera.getWorldDirection(cameraDirection);
+                     // Prosty sposób na uzyskanie pitch i yaw (wymaga więcej matematyki dla pełnej precyzji)
+                     // Yaw można wziąć z obiektu controls (jeśli używamy PointerLockControls)
+                     const yaw = controls.getObject().rotation.y;
+                     // Pitch jest trochę trudniejszy, zależy od wewnętrznej rotacji kamery w PointerLockControls
+                     const pitch = controls.getObject().children[0].rotation.x;
+
+
+                     ws.send(JSON.stringify({
+                         type: 'player_update',
+                         payload: {
+                             position: { x: playerPosition.x, y: playerPosition.y - playerHeight + 1, z: playerPosition.z }, // Wysyłamy pozycję "stóp" gracza
+                             rotation: { pitch: pitch, yaw: yaw }
+                         }
+                     }));
+                 }
+            }
+
+             // Aktualizacja etykiet graczy na ekranie
+             for (const id in players) {
+                if(id !== localPlayerId){
+                    updatePlayerLabel(players[id], players[id].health);
+                }
+             }
+
+
+            renderer.render(scene, camera);
+        }
+
+    </script>
+</body>
+</html>
