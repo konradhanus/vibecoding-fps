@@ -1,0 +1,37 @@
+# Zależności (najważniejsze!)
+/node_modules
+
+# Pliki logów
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Pliki środowiskowe (zawierające np. klucze API, hasła)
+.env
+.env.local
+.env.*.local
+
+# Wygenerowane pliki lub foldery buildów (jeśli używasz)
+/dist
+/build
+/public # Jeśli to folder z wynikami budowania, a nie ze źródłami
+
+# Pliki tymczasowe systemów operacyjnych
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Pliki konfiguracyjne i tymczasowe edytorów/IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Pliki tymczasowe związane z zależnościami (rzadziej potrzebne)
+# package-lock.json # Zwykle CHCESZ śledzić ten plik, odkomentuj jeśli masz powód by go ignorować
+# yarn.lock # Podobnie jak wyżej, dla Yarn
+
+# Inne pliki tymczasowe lub specyficzne dla projektu
+# np. /coverage # Wyniki testów pokrycia kodu
