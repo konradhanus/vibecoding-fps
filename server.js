@@ -1,22 +1,25 @@
+// --- START OF FILE server.js ---
+
 // server.js
 const WebSocket = require('ws');
 
 const wss = new WebSocket.Server({ port: 8080 });
 
-let players = {}; // { id: { x, y, z, pitch, yaw, health, ammo, magazine, name, kills, deaths, lastUpdateTime } }
+let players = {}; // { id: { x, y, z, pitch, yaw, health, ammo, magazine, name, kills, deaths, lastUpdateTime, reloading, reloadStartTime } }
 let projectiles = []; // { id, x, y, z, vx, vy, vz, ownerId, spawnTime }
 let projectileIdCounter = 0;
 let clientMap = new Map(); // Map<playerId, WebSocket>
 
 const START_HEALTH = 100;
 const START_AMMO = 100;
-const START_MAGAZINE = 30;
-const PLAYER_RADIUS = 0.4; // Zmniejsz promień dla kolizji gracz-gracz
-const PLAYER_HEIGHT = 1.8; // Wysokość gracza (dla kolizji)
+const START_MAGAZINE = 30; // Maksymalna pojemność magazynka
+const RELOAD_DURATION = 2000; // ms - czas przeładowania
+const PLAYER_RADIUS = 0.4;
+const PLAYER_HEIGHT = 1.8;
 const PROJECTILE_SPEED = 50;
 const PROJECTILE_DAMAGE = 10;
 const PROJECTILE_LIFETIME = 2000; // ms
-const RESPAWN_TIME = 5000; // ms
+const RESPAWN_TIME = 3000; // ms - Zmieniono na 3 sekundy
 const INACTIVITY_TIMEOUT = 30000; // ms
 
 console.log("Serwer WebSocket nasłuchuje na porcie 8080");
@@ -31,35 +34,36 @@ wss.on('connection', (ws) => {
         id: playerId,
         name: playerName,
         x: Math.random() * 10 - 5,
-        y: 1, // Pozycja "stóp" gracza lekko nad ziemią
+        y: 1,
         z: Math.random() * 10 - 5,
         pitch: 0,
         yaw: 0,
         health: START_HEALTH,
         ammo: START_AMMO,
         magazine: START_MAGAZINE,
-        kills: 0, // Śledzenie zabójstw
-        deaths: 0, // Śledzenie zgonów
+        kills: 0,
+        deaths: 0,
+        reloading: false, // Dodano flagę przeładowania
+        reloadStartTime: 0, // Dodano czas rozpoczęcia przeładowania
         lastUpdateTime: Date.now()
     };
-    clientMap.set(playerId, ws); // Zapisz mapowanie
+    clientMap.set(playerId, ws);
 
     // Wyślij nowemu graczowi jego ID i aktualny stan gry
     ws.send(JSON.stringify({
         type: 'init',
         payload: {
             id: playerId,
-            players: players, // Wyślij wszystkich graczy (w tym nowego ze statystykami)
+            players: players,
             projectiles: projectiles.map(p => ({...p, type: 'projectile'}))
         }
     }));
 
-    // Poinformuj innych o nowym graczu (z jego imieniem)
+    // Poinformuj innych o nowym graczu
     broadcast({
         type: 'player_joined',
-        // Wyślij pełne dane nowego gracza, w tym jego imię i pozycję startową
         payload: { id: playerId, name: playerName, ...players[playerId] }
-    }, ws); // Wyślij do wszystkich oprócz nowego
+    }, ws);
 
     // Obsługa wiadomości od klienta
     ws.on('message', (message) => {
@@ -67,17 +71,15 @@ wss.on('connection', (ws) => {
            const data = JSON.parse(message);
            const player = players[playerId];
 
-           // Ignoruj wiadomości od graczy, którzy już nie istnieją
            if (!player) {
                console.warn(`Otrzymano wiadomość od nieistniejącego gracza ${playerId}`);
                return;
            }
 
-           // Aktualizuj czas aktywności (nawet jeśli gracz jest martwy, aby zapobiec timeoutowi jeśli próbuje coś zrobić)
            player.lastUpdateTime = Date.now();
 
-           // Obsługa wiadomości tylko od żywych graczy (poza specyficznymi akcjami jak np. czat)
-           if (player.health <= 0 && !['request_respawn', 'chat_message'].includes(data.type)) { // Przykład z czatem
+           // Obsługa wiadomości tylko od żywych graczy (poza specyficznymi akcjami)
+           if (player.health <= 0 && !['request_respawn', 'chat_message'].includes(data.type)) {
                 return;
            }
 
@@ -85,15 +87,15 @@ wss.on('connection', (ws) => {
                case 'player_update':
                    if (isValidPosition(data.payload.position) && isValidRotation(data.payload.rotation)) {
                        player.x = data.payload.position.x;
-                       // Serwer decyduje o Y gracza, aby uprościć kolizje na kliencie
-                       player.y = 1.0; // Utrzymuj graczy na poziomie gruntu serwera
+                       player.y = 1.0;
                        player.z = data.payload.position.z;
                        player.pitch = data.payload.rotation.pitch;
                        player.yaw = data.payload.rotation.yaw;
                    }
                    break;
                case 'shoot':
-                   if (player.magazine > 0) { // Sprawdź czy gracz ma amunicję (już w ifie głównym sprawdzamy czy żyje)
+                   // Strzelanie możliwe tylko gdy gracz żyje, nie przeładowuje i ma amunicję w magazynku
+                   if (player.health > 0 && !player.reloading && player.magazine > 0) {
                        player.magazine--;
                        const projectileId = `proj_${projectileIdCounter++}`;
                        const direction = data.payload.direction;
@@ -106,30 +108,56 @@ wss.on('connection', (ws) => {
                            vz: direction.z * PROJECTILE_SPEED,
                        };
                        projectiles.push(newProjectile);
-                       // Poinformuj wszystkich o nowym pocisku
                        broadcast({ type: 'projectile_created', payload: {...newProjectile, type: 'projectile'} });
                        // Wyślij aktualizację amunicji tylko do strzelającego
                        ws.send(JSON.stringify({ type: 'ammo_update', payload: { magazine: player.magazine, ammo: player.ammo } }));
                    }
                    break;
-                // Można dodać inne typy wiadomości, np. 'reload', 'change_weapon', 'chat_message'
+                case 'request_reload':
+                    // Rozpocznij przeładowanie jeśli gracz żyje, nie przeładowuje, magazynek nie jest pełny i ma amunicję zapasową
+                    if (player.health > 0 && !player.reloading && player.magazine < START_MAGAZINE && player.ammo > 0) {
+                        console.log(`Gracz ${player.name} rozpoczyna przeładowanie.`);
+                        player.reloading = true;
+                        player.reloadStartTime = Date.now();
+
+                        // Zakończ przeładowanie po RELOAD_DURATION
+                        setTimeout(() => {
+                            // Sprawdź ponownie czy gracz istnieje i czy *nadal* przeładowuje (mógł zginąć/rozłączyć się)
+                            const currentPlayer = players[playerId];
+                            if (currentPlayer && currentPlayer.reloading) {
+                                const ammoNeeded = START_MAGAZINE - currentPlayer.magazine;
+                                const ammoToMove = Math.min(ammoNeeded, currentPlayer.ammo);
+
+                                currentPlayer.magazine += ammoToMove;
+                                currentPlayer.ammo -= ammoToMove;
+                                currentPlayer.reloading = false;
+
+                                console.log(`Gracz ${currentPlayer.name} zakończył przeładowanie. Amunicja: ${currentPlayer.magazine}/${currentPlayer.ammo}`);
+
+                                // Wyślij aktualizację amunicji do klienta
+                                const playerWs = clientMap.get(playerId);
+                                if (playerWs && playerWs.readyState === WebSocket.OPEN) {
+                                    playerWs.send(JSON.stringify({ type: 'ammo_update', payload: { magazine: currentPlayer.magazine, ammo: currentPlayer.ammo } }));
+                                }
+                            }
+                        }, RELOAD_DURATION);
+
+                        // Opcjonalnie: wyślij potwierdzenie rozpoczęcia przeładowania (jeśli klient tego potrzebuje)
+                        // ws.send(JSON.stringify({ type: 'reload_started', payload: { duration: RELOAD_DURATION } }));
+                    }
+                    break;
            }
        } catch (error) {
-           // Loguj błąd razem z otrzymaną wiadomością dla lepszej diagnostyki
            console.error(`Błąd przetwarzania wiadomości od ${playerName} (${playerId}):`, error, "Wiadomość:", message.toString());
        }
    });
 
-    // Obsługa rozłączenia
     ws.on('close', () => {
         handleDisconnect(playerId, playerName, "rozłączył się");
     });
 
-    // Obsługa błędu
     ws.on('error', (error) => {
         console.error(`Błąd WebSocket dla gracza ${playerName} (${playerId}):`, error);
-        // handleDisconnect jest wywoływane również w przypadku błędu, bo 'close' zazwyczaj następuje po 'error'
-        // ale można dodać logikę specyficzną dla błędu, jeśli jest potrzebna
     });
 });
 
@@ -137,7 +165,6 @@ wss.on('connection', (ws) => {
 let lastTickTime = Date.now();
 setInterval(() => {
     const now = Date.now();
-    // Ogranicz deltaTime, aby uniknąć problemów przy dużych lagach lub pauzach
     const deltaTime = Math.min((now - lastTickTime) / 1000.0, 0.1);
     lastTickTime = now;
 
@@ -147,40 +174,34 @@ setInterval(() => {
 
     // 1. Aktualizacja pocisków i detekcja kolizji
     projectiles = projectiles.filter(p => {
-        // Przesuń pocisk
         p.x += p.vx * deltaTime;
         p.y += p.vy * deltaTime;
         p.z += p.vz * deltaTime;
 
-        // Sprawdź czas życia lub wyjście poza mapę (proste Y<0)
-        if (now - p.spawnTime > PROJECTILE_LIFETIME || p.y < -1) { // Trochę niżej niż 0
+        if (now - p.spawnTime > PROJECTILE_LIFETIME || p.y < -1) {
             expiredProjectiles.push(p.id);
-            return false; // Usuń pocisk
+            return false;
         }
 
-        // Sprawdź kolizje z graczami
         for (const targetId in players) {
-            if (p.ownerId === targetId) continue; // Nie strzelaj do siebie
+            // Nie można trafić siebie ani graczy, którzy są martwi lub się przeładowują (opcjonalne - zazwyczaj można trafiać przeładowujących)
+            if (p.ownerId === targetId) continue;
             const target = players[targetId];
             if (!target || target.health <= 0) continue; // Pomiń nieistniejących lub martwych
 
-            // Prosta kolizja - odległość od środka postaci
             const dx = p.x - target.x;
-            const dy = p.y - (target.y + PLAYER_HEIGHT / 2); // Środek wysokości gracza (Y=1 to stopy)
+            const dy = p.y - (target.y + PLAYER_HEIGHT / 2);
             const dz = p.z - target.z;
             const distSq = dx * dx + dy * dy + dz * dz;
-            // Kwadrat progu kolizji (promień gracza + promień pocisku)
-            const collisionThresholdSq = (PLAYER_RADIUS + 0.1) * (PLAYER_RADIUS + 0.1); // 0.1 to promień pocisku
+            const collisionThresholdSq = (PLAYER_RADIUS + 0.1) * (PLAYER_RADIUS + 0.1);
 
             if (distSq < collisionThresholdSq) {
-                // Trafienie!
                 target.health -= PROJECTILE_DAMAGE;
-                expiredProjectiles.push(p.id); // Pocisk znika po trafieniu
+                expiredProjectiles.push(p.id);
 
-                const attacker = players[p.ownerId]; // Pobierz atakującego
-                const attackerName = attacker?.name || 'Nieznany'; // Uzyskaj imię atakującego
+                const attacker = players[p.ownerId];
+                const attackerName = attacker?.name || 'Nieznany';
 
-                // Dodaj zdarzenie trafienia (z imieniem atakującego)
                 hitEvents.push({
                     targetId: targetId,
                     newHealth: target.health,
@@ -190,13 +211,12 @@ setInterval(() => {
 
                 console.log(`Gracz ${target.name} trafiony przez ${attackerName}. Zdrowie: ${target.health}`);
 
-                // Sprawdź, czy gracz zginął
                 if (target.health <= 0) {
-                    target.health = 0; // Nie pozwól na ujemne zdrowie
-                    target.deaths++; // Zwiększ liczbę śmierci ofiary
+                    target.health = 0;
+                    target.deaths++;
+                    target.reloading = false; // Przerwij przeładowanie przy śmierci
                     console.log(`Gracz ${target.name} pokonany przez ${attackerName}.`);
 
-                    // Dodaj zdarzenie śmierci (z imionami)
                     deathEvents.push({
                         victimId: targetId,
                         victimName: target.name,
@@ -204,34 +224,31 @@ setInterval(() => {
                         attackerName: attackerName
                     });
 
-                    // Zwiększ liczbę zabójstw atakującego (jeśli istnieje i nie zabił sam siebie)
                     if (attacker && attacker.id !== targetId) {
                        attacker.kills++;
                     }
 
-                    // Loguj statystyki po śmierci
                     console.log(`Statystyki ${target.name}: ${target.kills} K / ${target.deaths} D`);
                     if (attacker) {
                         console.log(`Statystyki ${attacker.name}: ${attacker.kills} K / ${attacker.deaths} D`);
                     }
 
-                    // Uruchom respawn dla ofiary
                     setTimeout(() => respawnPlayer(targetId), RESPAWN_TIME);
                 }
-                return false; // Pocisk trafiał, usuń go z listy do dalszego przetwarzania
+                return false;
             }
         }
-        return true; // Zachowaj pocisk w liście, jeśli nie trafił lub nie wygasł
+        return true;
     });
 
     // 2. Rozsyłanie stanu gry
     const gameState = {
         type: 'game_state',
         payload: {
-            players: players, // Wysyłaj zawsze pełne dane graczy (w tym K/D)
+            players: players, // Wysyłaj zawsze pełne dane graczy (w tym reloading)
             hits: hitEvents,
-            deaths: deathEvents, // Wyślij informacje o zgonach z imionami
-            removedProjectiles: expiredProjectiles // ID pocisków do usunięcia na kliencie
+            deaths: deathEvents,
+            removedProjectiles: expiredProjectiles
         }
     };
     broadcast(gameState);
@@ -240,34 +257,31 @@ setInterval(() => {
     for (const playerId in players) {
         if (now - players[playerId].lastUpdateTime > INACTIVITY_TIMEOUT) {
             const wsInstance = clientMap.get(playerId);
-            const playerName = players[playerId]?.name || playerId; // Użyj imienia jeśli dostępne
+            const playerName = players[playerId]?.name || playerId;
             if (wsInstance) {
                 console.log(`Rozłączanie nieaktywnego gracza ${playerName}.`);
-                wsInstance.close(); // Zamknięcie WS wywoła 'close' i sprzątanie w handleDisconnect
+                wsInstance.close();
             } else {
-                 // Rzadki przypadek: gracz jest w liście, ale nie ma go w mapie WS
                  handleDisconnect(playerId, playerName, "usunięty z powodu braku aktywności (brak WS)");
             }
         }
     }
 
-}, 1000 / 30); // Aktualizacja stanu gry ~30 razy na sekundę
+}, 1000 / 30);
 
 function respawnPlayer(playerId) {
     const player = players[playerId];
-    if (player) { // Sprawdź, czy gracz nadal istnieje (mógł się rozłączyć w międzyczasie)
+    if (player) {
         console.log(`Odradzanie gracza ${player.name}`);
-        // Ustaw nowe losowe pozycje i zresetuj stan
         player.x = Math.random() * 10 - 5;
-        player.y = 1; // Pozycja stóp
+        player.y = 1;
         player.z = Math.random() * 10 - 5;
         player.health = START_HEALTH;
         player.magazine = START_MAGAZINE;
         player.ammo = START_AMMO;
-        // Kills i deaths NIE są resetowane przy respawnie
-        player.lastUpdateTime = Date.now(); // Zaktualizuj czas aktywności przy respawnie
+        player.reloading = false; // Upewnij się, że nie jest w stanie przeładowania
+        player.lastUpdateTime = Date.now();
 
-        // Poinformuj wszystkich o respawnie (w tym samego gracza)
         broadcast({
             type: 'player_respawned',
             payload: {
@@ -284,43 +298,33 @@ function respawnPlayer(playerId) {
 
 function handleDisconnect(playerId, playerName, reason) {
     console.log(`Gracz ${playerName || playerId} ${reason}.`);
-    const disconnectedPlayerName = players[playerId]?.name; // Pobierz imię przed usunięciem gracza
+    const disconnectedPlayerName = players[playerId]?.name;
     if (players[playerId]) {
-        delete players[playerId]; // Usuń gracza z głównej listy stanu
+        delete players[playerId];
     }
-    clientMap.delete(playerId); // Usuń mapowanie WebSocketu
-    // Poinformuj pozostałych graczy o wyjściu (wyślij imię)
+    clientMap.delete(playerId);
     broadcast({
         type: 'player_left',
-        payload: { id: playerId, name: disconnectedPlayerName || 'Nieznany' } // Użyj zapisanego imienia
+        payload: { id: playerId, name: disconnectedPlayerName || 'Nieznany' }
     });
 }
 
-// Funkcja pomocnicza do rozsyłania wiadomości
 function broadcast(message, senderWs = null) {
     const messageString = JSON.stringify(message);
-    // Iteruj po wszystkich połączonych klientach
     wss.clients.forEach((client) => {
-        // Wyślij do wszystkich oprócz nadawcy (jeśli podano) LUB jeśli klient jest gotowy do odbioru
         if (client !== senderWs && client.readyState === WebSocket.OPEN) {
             try {
                 client.send(messageString);
             } catch (error) {
-                // Loguj błąd, ale nie przerywaj pętli dla innych klientów
                 console.error("Błąd podczas wysyłania broadcast do klienta:", error);
-                // Można by dodać logikę rozłączania klienta, który powoduje błąd przy wysyłaniu
-                // client.terminate();
             }
         }
     });
 }
 
-// Funkcja pomocnicza do generowania unikalnego ID
 function generateUniqueId() {
-    // Prosty generator ID - w produkcji warto użyć czegoś bardziej niezawodnego (np. uuid)
     return Math.random().toString(36).substring(2, 15);
 }
 
-// Proste funkcje walidacyjne (bez zmian)
 function isValidPosition(pos) { return typeof pos==='object' && typeof pos.x==='number' && !isNaN(pos.x) && typeof pos.y==='number' && !isNaN(pos.y) && typeof pos.z==='number' && !isNaN(pos.z); }
 function isValidRotation(rot) { return typeof rot==='object' && typeof rot.pitch==='number' && !isNaN(rot.pitch) && typeof rot.yaw==='number' && !isNaN(rot.yaw); }
